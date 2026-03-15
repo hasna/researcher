@@ -243,11 +243,17 @@ program
   .description("Start a research workspace and run experiments")
   .action(async (projectName, options) => {
     const config = loadConfig()
-    const db = initDb(getDbPath())
+
+    // Resolve project: check registry first, then try local/global DB
+    const registered = getRegisteredProject(projectName)
+    const dbPath = registered ? resolveDbPath(registered.path) : getDbPath()
+    const db = initDb(dbPath)
+
     try {
       const project = (getProjectByName(db, projectName) ?? getProject(db, projectName)) as Record<string, unknown> | null
       if (!project) {
         console.error(`Project not found: ${projectName}`)
+        if (registered) console.error(`  (registered at ${registered.path} but not in local DB — try 'researcher init' there)`)
         process.exit(1)
       }
 

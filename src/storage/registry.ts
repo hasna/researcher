@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS projects (
   last_run_at TEXT,
   total_cost REAL NOT NULL DEFAULT 0,
   total_experiments INTEGER NOT NULL DEFAULT 0,
-  health_status TEXT NOT NULL DEFAULT 'unknown' CHECK (health_status IN ('healthy', 'stale', 'failing', 'unknown')),
+  health_status TEXT NOT NULL DEFAULT 'unknown' CHECK (health_status IN ('healthy', 'stale', 'failing', 'unknown', 'new', 'missing')),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -139,7 +139,7 @@ export function updateProjectStats(path: string, cost: number, experiments: numb
 /**
  * Update project health status.
  */
-export function updateProjectHealth(path: string, status: "healthy" | "stale" | "failing" | "unknown"): void {
+export function updateProjectHealth(path: string, status: "healthy" | "stale" | "failing" | "unknown" | "new" | "missing"): void {
   const db = getRegistryDb()
   db.run("UPDATE projects SET health_status = ?, updated_at = datetime('now') WHERE path = ?", [status, resolve(path)])
 }
