@@ -1,0 +1,13 @@
+name: Prompt Engineering
+domain: prompts
+default_metric: accuracy
+default_metric_direction: higher
+suggested_cycle: gree
+description: >
+  Optimize prompts against an evaluation dataset.
+  Gather examples, refine prompt structure, experiment with variations, evolve best approach.
+files:
+  - prompt.md      # the prompt template to optimize
+  - evaluate.ts    # evaluation script
+  - dataset.json   # evaluation dataset
+  - program.md     # agent instructions

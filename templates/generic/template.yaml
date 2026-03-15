@@ -1,0 +1,12 @@
+name: Generic
+domain: general
+default_metric: score
+default_metric_direction: higher
+suggested_cycle: pflk
+description: >
+  Blank template — define your own experiment, evaluation, and metrics.
+  Use this as a starting point for any research domain.
+files:
+  - experiment.txt # the file to optimize
+  - evaluate.sh    # evaluation script
+  - program.md     # agent instructions

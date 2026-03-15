@@ -1,0 +1,12 @@
+name: Code Optimization
+domain: code
+default_metric: score
+default_metric_direction: lower
+suggested_cycle: pflk
+description: >
+  Optimize a single code file for a measurable metric.
+  Inspired by Karpathy's autoresearch — modify code, run benchmark, keep or discard.
+files:
+  - experiment.py  # or .ts, .go, etc. — the file the agent modifies
+  - evaluate.sh    # evaluation harness — runs benchmark, outputs metrics
+  - program.md     # agent instructions

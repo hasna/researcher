@@ -1,0 +1,11 @@
+name: Config Tuning
+domain: infrastructure
+default_metric: throughput
+default_metric_direction: higher
+suggested_cycle: pflk
+description: >
+  Optimize configuration files (database, server, etc.) for performance metrics.
+files:
+  - config.yaml    # the config to optimize
+  - benchmark.sh   # benchmark script
+  - program.md     # agent instructions

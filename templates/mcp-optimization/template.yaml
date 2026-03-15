@@ -1,0 +1,12 @@
+name: MCP Optimization
+domain: mcp
+default_metric: tokens_per_call
+default_metric_direction: lower
+suggested_cycle: pflk
+description: >
+  Optimize MCP tool definitions for fewer tokens without losing functionality.
+  Test different description formats, parameter schemas, response structures.
+files:
+  - tools.json     # MCP tool definitions
+  - evaluate.ts    # token counting + success rate evaluation
+  - program.md     # agent instructions

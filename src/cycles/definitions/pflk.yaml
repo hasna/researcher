@@ -1,0 +1,51 @@
+name: PFLK
+description: >
+  Problem, Feedback, Loophole, Knowledge.
+  Deeply understand the problem, gather feedback around it,
+  run many parallel experiments to find the loophole that cracks it,
+  and codify the winning approach as permanent knowledge.
+author: human
+phases:
+  - name: problem
+    type: think
+    provider_hint: balanced
+    skills: []
+    max_parallel: 1
+    description: Deeply understand the problem — what exactly is wrong, what's the goal
+    input: Project context, metric history, previous knowledge
+    output: Clear problem statement with specific targets
+
+  - name: feedback
+    type: gather
+    provider_hint: cheap
+    skills:
+      - web-search
+      - db-query
+      - file-scan
+    max_parallel: 1
+    description: Gather feedback around the problem — context, data, past attempts, related work
+    input: Problem statement
+    output: Context bundle with relevant data, prior art, constraints
+
+  - name: loophole
+    type: parallel_experiment
+    provider_hint: user_choice
+    skills:
+      - file-edit
+      - run-command
+      - benchmark
+      - git-ops
+    max_parallel: 20
+    description: Run many parallel experiments to find the crack that solves the problem
+    input: Problem statement + feedback context
+    output: Ranked experiment results with diffs and metrics
+
+  - name: knowledge
+    type: synthesize
+    provider_hint: smart
+    skills:
+      - db-query
+    max_parallel: 1
+    description: Codify the winning experiment as permanent, reusable knowledge
+    input: All experiment results with winner highlighted
+    output: Knowledge entry with insight, evidence, confidence score

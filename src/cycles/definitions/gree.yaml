@@ -1,0 +1,52 @@
+name: GREE
+description: >
+  Gather, Refine, Experiment, Evolve.
+  Escalate intelligence through phases — cheap model gathers raw info,
+  better model refines it, right model runs experiments,
+  best model synthesizes the evolution.
+author: human
+phases:
+  - name: gather
+    type: gather
+    provider_hint: cheap
+    skills:
+      - web-search
+      - db-query
+      - file-scan
+    max_parallel: 1
+    description: Use a fast/cheap model to collect raw information broadly
+    input: Project context, research question
+    output: Raw information bundle — unfiltered, comprehensive
+
+  - name: refine
+    type: escalate
+    provider_hint: balanced
+    skills:
+      - db-query
+    max_parallel: 1
+    description: Use a better model to distill, filter, and structure the gathered data
+    input: Raw information bundle from gather phase
+    output: Refined hypotheses, prioritized experiment ideas, structured context
+
+  - name: experiment
+    type: parallel_experiment
+    provider_hint: user_choice
+    skills:
+      - file-edit
+      - run-command
+      - benchmark
+      - git-ops
+    max_parallel: 20
+    description: Run experiments using the right model for the job
+    input: Refined hypotheses and experiment designs
+    output: Ranked experiment results with metrics
+
+  - name: evolve
+    type: synthesize
+    provider_hint: best
+    skills:
+      - db-query
+    max_parallel: 1
+    description: Lock in the evolution — synthesize what was learned into permanent knowledge
+    input: All experiment results and refined context
+    output: Evolved knowledge, updated strategy, next research direction
