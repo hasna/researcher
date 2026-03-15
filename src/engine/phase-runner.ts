@@ -13,6 +13,7 @@ import type { Database } from "bun:sqlite"
 import type { PhaseDefinition } from "../types.ts"
 import type { ProviderRouter } from "../providers/router.ts"
 import { logModelCall } from "../db/index.ts"
+import { saveKnowledge } from "./knowledge.ts"
 
 export interface PhaseContext {
   db: Database
@@ -230,6 +231,27 @@ Synthesize the results into:
     latency_ms: result.latency_ms,
     phase: ctx.phase.name,
   })
+
+  // Auto-save knowledge from synthesize output
+  try {
+    // Extract the KEY INSIGHT or KNOWLEDGE line
+    const insightMatch = result.content.match(/KEY INSIGHT[:\s]*\n?\s*\**(.+?)(?:\*\*|\n\n)/is)
+      ?? result.content.match(/KNOWLEDGE:\s*(.+)/i)
+    const insight = insightMatch?.[1]?.replace(/\*\*/g, "").trim() ?? result.content.slice(0, 500)
+    // Extract confidence — look for 0.XX pattern near "CONFIDENCE"
+    const confidenceMatch = result.content.match(/CONFIDENCE[:\s]*\**\s*(0?\.\d+|\d\.\d+)/i)
+    const confidence = confidenceMatch ? parseFloat(confidenceMatch[1]!) : 0.5
+
+    saveKnowledge(ctx.db, {
+      project_id: ctx.projectId,
+      domain: "general",
+      insight,
+      confidence: Math.min(1, Math.max(0, confidence)),
+      tags: ["auto-generated", ctx.phase.name],
+    })
+  } catch {
+    // Non-critical — don't fail the phase if knowledge save fails
+  }
 
   return {
     phaseName: ctx.phase.name,

@@ -15,9 +15,8 @@ const PRICING: Record<string, Record<string, { input: number; output: number }>>
     "o3-mini": { input: 1.1, output: 4.4 },
   },
   cerebras: {
-    "llama-4-scout-17b-16e": { input: 0.2, output: 0.6 },
-    "llama-3.3-70b": { input: 0.85, output: 1.2 },
-    "llama-3.1-8b": { input: 0.1, output: 0.1 },
+    "llama3.1-8b": { input: 0.1, output: 0.1 },
+    "qwen-3-235b-a22b-instruct-2507": { input: 0.2, output: 0.6 },
   },
   local: {},
 }
@@ -98,7 +97,7 @@ export function createCerebrasProvider(apiKey?: string): OpenAICompatProvider {
     name: "cerebras",
     apiKey: apiKey ?? process.env.CEREBRAS_API_KEY,
     baseUrl: "https://api.cerebras.ai/v1",
-    defaultModel: "llama-4-scout-17b-16e",
+    defaultModel: "llama3.1-8b",
   })
 }
 

@@ -74,7 +74,7 @@ export function loadConfig(): ResearcherConfig {
       name: "cerebras",
       api_key: process.env.CEREBRAS_API_KEY,
       base_url: "https://api.cerebras.ai/v1",
-      default_model: config.providers.cerebras?.default_model ?? "llama-4-scout-17b-16e",
+      default_model: config.providers.cerebras?.default_model ?? "llama3.1-8b",
     }
   }
   if (process.env.LOCAL_LLM_URL || process.env.LOCAL_LLM_MODEL) {
