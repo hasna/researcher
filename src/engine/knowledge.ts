@@ -155,3 +155,40 @@ export function exportKnowledgeMarkdown(db: Database, projectId?: string): strin
 
   return md
 }
+
+/**
+ * Apply confidence decay to knowledge entries that haven't been confirmed recently.
+ * Entries lose ~1% confidence per day without new evidence.
+ */
+export function applyConfidenceDecay(db: Database): number {
+  // Decay entries not updated in the last 7 days
+  const result = db.run(
+    `UPDATE knowledge
+     SET confidence = MAX(0.05, confidence * 0.99),
+         updated_at = datetime('now')
+     WHERE updated_at < datetime('now', '-7 days')
+     AND confidence > 0.05`,
+  )
+  return result.changes
+}
+
+/**
+ * Get stale knowledge — entries with low confidence due to decay.
+ */
+export function getStaleKnowledge(db: Database, threshold: number = 0.2): KnowledgeEntry[] {
+  const rows = db
+    .query("SELECT * FROM knowledge WHERE confidence <= ? ORDER BY confidence ASC")
+    .all(threshold) as Record<string, unknown>[]
+
+  return rows.map((row) => ({
+    id: row.id as string,
+    project_id: row.project_id as string | null,
+    domain: row.domain as string,
+    insight: row.insight as string,
+    evidence: JSON.parse((row.evidence as string) ?? "[]"),
+    confidence: row.confidence as number,
+    tags: JSON.parse((row.tags as string) ?? "[]"),
+    created_at: row.created_at as string,
+    updated_at: row.updated_at as string,
+  }))
+}

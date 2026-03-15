@@ -5,6 +5,7 @@
  */
 
 import { Command } from "commander"
+import { table, statusColor, color } from "./table.ts"
 import { initDb, createProject, listProjects, getProject, getProjectByName, deleteProject, createWorkspace, listWorkspaces, getWorkspace, listResults, updateWorkspaceStatus, deleteWorkspace } from "../db/index.ts"
 import { loadConfig, saveConfig, ensureConfigDir, getDbPath } from "../config/index.ts"
 import { CycleRegistry } from "../cycles/registry.ts"
@@ -49,6 +50,24 @@ program
     console.log("  Database: ~/.researcher/researcher.db")
     console.log("\nSet API keys via env vars or edit config.toml:")
     console.log("  ANTHROPIC_API_KEY, OPENAI_API_KEY, CEREBRAS_API_KEY, E2B_API_KEY")
+
+    // Validate providers
+    console.log("\nValidating providers...")
+    const router = new ProviderRouter({
+      anthropic: config.providers.anthropic ? { apiKey: config.providers.anthropic.api_key } : undefined,
+      openai: config.providers.openai ? { apiKey: config.providers.openai.api_key } : undefined,
+      cerebras: config.providers.cerebras ? { apiKey: config.providers.cerebras.api_key } : undefined,
+      local: config.providers.local ? { baseUrl: config.providers.local.base_url, model: config.providers.local.default_model } : undefined,
+    })
+    for (const name of router.listProviders()) {
+      if (name === "local") { console.log(`  \x1b[33m?\x1b[0m ${name}: skipped (local — verify manually)`); continue }
+      try {
+        await router.resolve(name === "anthropic" ? "smart" : name === "cerebras" ? "cheap" : "balanced").generate("Say OK", { max_tokens: 5 })
+        console.log(`  \x1b[32m✓\x1b[0m ${name}: working`)
+      } catch (err) {
+        console.log(`  \x1b[31m✗\x1b[0m ${name}: ${err instanceof Error ? err.message.slice(0, 80) : "failed"}`)
+      }
+    }
   })
 
 // ─── Project ─────────────────────────────────────────────────────────────────
@@ -97,9 +116,10 @@ projectCmd
         return
       }
       console.log(`${projects.length} project(s):\n`)
-      for (const p of projects) {
-        console.log(`  ${p.id}  ${p.name}  [${p.domain}]  ${p.metric_name} (${p.metric_direction})`)
-      }
+      console.log(table(
+        ["ID", "Name", "Domain", "Metric", "Direction"],
+        projects.map(p => [String(p.id), String(p.name), String(p.domain), String(p.metric_name), String(p.metric_direction)])
+      ))
     } finally {
       db.close()
     }
@@ -303,11 +323,25 @@ program
             previousKnowledge: previousKnowledge || undefined,
           },
           onPhaseStart: (phase, i) => {
-            console.log(`[${i + 1}/${cycle.phases.length}] Starting phase: ${phase.name} (${phase.type}, ${phase.provider_hint})`)
+            const spinner = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+            let frame = 0
+            const start = Date.now()
+            const interval = setInterval(() => {
+              const elapsed = ((Date.now() - start) / 1000).toFixed(0)
+              process.stdout.write(`\r  ${spinner[frame++ % spinner.length]} [${i + 1}/${cycle.phases.length}] ${phase.name} (${phase.provider_hint}) — ${elapsed}s`)
+            }, 100)
+            // Store interval on phase object for cleanup
+            ;(phase as unknown as Record<string, unknown>)._interval = interval
+            ;(phase as unknown as Record<string, unknown>)._start = start
           },
           onPhaseComplete: (phase, phaseResult, i) => {
-            console.log(`[${i + 1}/${cycle.phases.length}] Completed: ${phase.name} — $${phaseResult.cost.toFixed(4)} (${phaseResult.provider}/${phaseResult.model})`)
-            console.log(`  ${phaseResult.summary.slice(0, 200)}...\n`)
+            const interval = (phase as unknown as Record<string, unknown>)._interval as ReturnType<typeof setInterval> | undefined
+            if (interval) clearInterval(interval)
+            const start = (phase as unknown as Record<string, unknown>)._start as number | undefined
+            const elapsed = start ? ((Date.now() - start) / 1000).toFixed(1) : "?"
+            process.stdout.write(`\r`)
+            console.log(`  \x1b[32m✓\x1b[0m [${i + 1}/${cycle.phases.length}] ${phase.name} — $${phaseResult.cost.toFixed(4)} (${phaseResult.provider}/${phaseResult.model}) ${elapsed}s`)
+            console.log(`    ${phaseResult.summary.slice(0, 200)}...\n`)
           },
         })
 
@@ -460,6 +494,24 @@ program
     }
   })
 
+// ─── Diff ────────────────────────────────────────────────────────────────────
+
+program
+  .command("diff")
+  .argument("<result-id>", "Result ID")
+  .description("Show the file diff from an experiment result")
+  .action(async (resultId) => {
+    const db = initDb(getDbPath())
+    try {
+      const result = db.query("SELECT * FROM results WHERE id = ?").get(resultId) as Record<string, unknown> | null
+      if (!result) { console.error(`Result not found: ${resultId}`); process.exit(1) }
+      if (!result.diff) { console.log("No diff recorded for this result."); return }
+      console.log(result.diff)
+    } finally {
+      db.close()
+    }
+  })
+
 // ─── History ─────────────────────────────────────────────────────────────────
 
 program
@@ -562,11 +614,30 @@ program
         return
       }
 
+      if (isJson()) { console.log(JSON.stringify(entries, null, 2)); return }
       console.log(`${entries.length} knowledge entries:\n`)
       for (const entry of entries) {
-        console.log(`  [${(entry.confidence * 100).toFixed(0)}%] ${entry.insight}`)
-        console.log(`    Domain: ${entry.domain} | Tags: ${entry.tags.join(", ") || "none"}`)
+        console.log(`  [${(entry.confidence * 100).toFixed(0)}%] ${entry.insight.slice(0, 200)}`)
+        console.log(`    ID: ${entry.id} | Domain: ${entry.domain} | Tags: ${entry.tags.join(", ") || "none"}`)
         console.log()
+      }
+    } finally {
+      db.close()
+    }
+  })
+
+program
+  .command("knowledge-delete")
+  .argument("<id>", "Knowledge entry ID")
+  .description("Delete a knowledge entry")
+  .action(async (id) => {
+    const db = initDb(getDbPath())
+    try {
+      const result = db.run("DELETE FROM knowledge WHERE id = ?", [id])
+      if (result.changes > 0) {
+        console.log(`Deleted knowledge entry: ${id}`)
+      } else {
+        console.error(`Knowledge entry not found: ${id}`)
       }
     } finally {
       db.close()
@@ -661,6 +732,58 @@ program
       console.log(`    Phases: ${c.phases.map(p => p.name).join(" → ")}`)
       console.log(`    ${c.description.slice(0, 120)}`)
       console.log()
+    }
+  })
+
+program
+  .command("cycle-new")
+  .option("--ai", "Let AI generate the cycle definition")
+  .option("--domain <domain>", "Target domain")
+  .option("--problem <desc>", "Problem description")
+  .description("Create a new research cycle")
+  .action(async (options) => {
+    if (options.ai) {
+      const config = loadConfig()
+      const router = new ProviderRouter({
+        anthropic: config.providers.anthropic ? { apiKey: config.providers.anthropic.api_key } : undefined,
+        openai: config.providers.openai ? { apiKey: config.providers.openai.api_key } : undefined,
+        cerebras: config.providers.cerebras ? { apiKey: config.providers.cerebras.api_key } : undefined,
+      })
+
+      console.log("Generating new cycle via AI...\n")
+      const { proposeCycle, saveCycle, analyzeCyclePerformance } = await import("../engine/meta.ts")
+      const db = initDb(getDbPath())
+      const analysis = await analyzeCyclePerformance(db)
+
+      const cycle = await proposeCycle(router, {
+        existingCycles: analysis,
+        domain: options.domain,
+        problem: options.problem,
+      })
+
+      if (!cycle) {
+        console.error("AI failed to generate a valid cycle.")
+        db.close()
+        return
+      }
+
+      console.log(`Generated: ${cycle.name}`)
+      console.log(`Phases: ${cycle.phases.map(p => p.name).join(" → ")}`)
+      console.log(`Description: ${cycle.description}\n`)
+
+      // Save to DB and filesystem
+      saveCycle(db, cycle)
+      const { writeFileSync } = require("node:fs")
+      const { join } = require("node:path")
+      const { stringify } = require("yaml")
+      const defDir = join(import.meta.dir, "../cycles/definitions")
+      const filename = `${cycle.id}.yaml`
+      writeFileSync(join(defDir, filename), stringify({ name: cycle.name, description: cycle.description, author: "ai", phases: cycle.phases }))
+      console.log(`Saved: ${filename}`)
+      db.close()
+    } else {
+      console.log("Manual cycle creation: create a YAML file and use 'researcher cycles add <file>'")
+      console.log("Or use --ai to let AI generate one.")
     }
   })
 
@@ -909,6 +1032,17 @@ program
     console.log(`  Max per workspace: ${config.resources.max_parallel_per_workspace}`)
     console.log(`  Max cost/hour: $${config.resources.max_cost_per_hour}`)
     console.log(`  Max cloud sandboxes: ${config.resources.max_cloud_sandboxes}`)
+  })
+
+// ─── Serve ───────────────────────────────────────────────────────────────────
+
+program
+  .command("serve")
+  .option("--port <port>", "Port to listen on", "7070")
+  .description("Start REST API server")
+  .action(async (options) => {
+    const { startServer } = await import("../api/server.ts")
+    startServer(parseInt(options.port))
   })
 
 // ─── MCP ─────────────────────────────────────────────────────────────────────
