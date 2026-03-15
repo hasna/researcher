@@ -8,6 +8,8 @@ import { Command } from "commander"
 import { table, statusColor, color } from "./table.ts"
 import { initDb, createProject, listProjects, getProject, getProjectByName, deleteProject, createWorkspace, listWorkspaces, getWorkspace, listResults, updateWorkspaceStatus, deleteWorkspace } from "../db/index.ts"
 import { loadConfig, saveConfig, ensureConfigDir, getDbPath } from "../config/index.ts"
+import { ensureGlobalDir, createLocalDir, findProjectRoot, isGitRepo, getGitRemote, resolveDbPath, getLocalDir } from "../storage/paths.ts"
+import { registerProject, listRegisteredProjects, getRegisteredProject, updateProjectHealth } from "../storage/registry.ts"
 import { CycleRegistry } from "../cycles/registry.ts"
 import { exportKnowledgeMarkdown, queryKnowledge } from "../engine/knowledge.ts"
 import { ResourceManager } from "../engine/resources.ts"
@@ -38,36 +40,82 @@ function output(data: unknown, formatted?: () => void): void {
 
 program
   .command("init")
-  .description("Initialize researcher config at ~/.researcher/")
-  .action(async () => {
+  .option("--name <name>", "Project name")
+  .option("--domain <domain>", "Research domain", "general")
+  .option("--metric <metric>", "Metric to optimize", "score")
+  .option("--direction <dir>", "Metric direction (lower, higher)", "higher")
+  .option("--global-only", "Only set up global config, skip project init")
+  .description("Initialize .researcher/ in the current folder (and global config if needed)")
+  .action(async (options) => {
+    const cwd = process.cwd()
+
+    // 1. Ensure global ~/.researcher/ exists
+    ensureGlobalDir()
     ensureConfigDir()
     const config = loadConfig()
     saveConfig(config)
-    const db = initDb(getDbPath())
-    db.close()
-    console.log("Initialized ~/.researcher/")
-    console.log("  Config: ~/.researcher/config.toml")
-    console.log("  Database: ~/.researcher/researcher.db")
-    console.log("\nSet API keys via env vars or edit config.toml:")
-    console.log("  ANTHROPIC_API_KEY, OPENAI_API_KEY, CEREBRAS_API_KEY, E2B_API_KEY")
 
-    // Validate providers
-    console.log("\nValidating providers...")
-    const router = new ProviderRouter({
-      anthropic: config.providers.anthropic ? { apiKey: config.providers.anthropic.api_key } : undefined,
-      openai: config.providers.openai ? { apiKey: config.providers.openai.api_key } : undefined,
-      cerebras: config.providers.cerebras ? { apiKey: config.providers.cerebras.api_key } : undefined,
-      local: config.providers.local ? { baseUrl: config.providers.local.base_url, model: config.providers.local.default_model } : undefined,
+    if (options.globalOnly) {
+      console.log("Initialized global ~/.researcher/")
+      console.log("  Config: ~/.researcher/config.toml")
+      return
+    }
+
+    // 2. Create local .researcher/ in current folder
+    const localDir = createLocalDir(cwd)
+    const db = initDb(resolveDbPath(cwd))
+
+    // 3. Detect git repo
+    const gitRepo = isGitRepo(cwd)
+    const gitRemote = gitRepo ? getGitRemote(cwd) : null
+    const projectName = options.name ?? require("node:path").basename(cwd)
+
+    // 4. Register in global registry
+    registerProject({
+      name: projectName,
+      path: cwd,
+      domain: options.domain,
+      metric_name: options.metric,
+      metric_direction: options.direction,
     })
-    for (const name of router.listProviders()) {
-      if (name === "local") { console.log(`  \x1b[33m?\x1b[0m ${name}: skipped (local — verify manually)`); continue }
-      try {
-        await router.resolve(name === "anthropic" ? "smart" : name === "cerebras" ? "cheap" : "balanced").generate("Say OK", { max_tokens: 5 })
-        console.log(`  \x1b[32m✓\x1b[0m ${name}: working`)
-      } catch (err) {
-        console.log(`  \x1b[31m✗\x1b[0m ${name}: ${err instanceof Error ? err.message.slice(0, 80) : "failed"}`)
+
+    // 5. Create project in local DB
+    const existingProject = getProjectByName(db, projectName)
+    if (!existingProject) {
+      createProject(db, {
+        name: projectName,
+        type: gitRepo ? "git_repo" : "directory",
+        path: cwd,
+        remote_url: gitRemote ?? undefined,
+        domain: options.domain,
+        metric_name: options.metric,
+        metric_direction: options.direction,
+      })
+    }
+
+    db.close()
+
+    console.log(`Initialized ${localDir}`)
+    console.log(`  Project: ${projectName}`)
+    console.log(`  Domain: ${options.domain}`)
+    console.log(`  Metric: ${options.metric} (${options.direction})`)
+    console.log(`  Git repo: ${gitRepo ? `yes${gitRemote ? ` (${gitRemote})` : ""}` : "no"}`)
+    console.log(`  Registered in global registry`)
+
+    // 6. Suggest .gitignore
+    if (gitRepo) {
+      const { existsSync, readFileSync, appendFileSync } = require("node:fs")
+      const giPath = require("node:path").join(cwd, ".gitignore")
+      if (existsSync(giPath)) {
+        const content = readFileSync(giPath, "utf-8")
+        if (!content.includes(".researcher")) {
+          appendFileSync(giPath, "\n# Researcher experiment data\n.researcher/\n")
+          console.log(`  Added .researcher/ to .gitignore`)
+        }
       }
     }
+
+    console.log(`\nRun experiments: researcher run ${projectName}`)
   })
 
 // ─── Project ─────────────────────────────────────────────────────────────────
@@ -359,6 +407,80 @@ program
       } while (options.continuous && !stopped)
     } finally {
       db.close()
+    }
+  })
+
+// ─── Health ──────────────────────────────────────────────────────────────────
+
+program
+  .command("health")
+  .argument("[project]", "Project name (or check all)")
+  .option("--fix", "Clean up failed sandboxes and stale data")
+  .description("Check health of all registered projects")
+  .action(async (projectName, options) => {
+    const projects = projectName
+      ? [getRegisteredProject(projectName)].filter(Boolean) as import("../storage/registry.ts").RegisteredProject[]
+      : listRegisteredProjects()
+
+    if (projects.length === 0) {
+      console.log("No registered projects. Run 'researcher init' in a project folder.")
+      return
+    }
+
+    if (isJson()) { console.log(JSON.stringify(projects, null, 2)); return }
+
+    console.log(`Health Report — ${projects.length} project(s)\n`)
+    for (const p of projects) {
+      const { existsSync } = require("node:fs")
+      const exists = existsSync(getLocalDir(p.path))
+
+      // Determine health
+      let health = "unknown"
+      if (!exists) {
+        health = "missing"
+      } else if (!p.last_run_at) {
+        health = "new"
+      } else {
+        const lastRun = new Date(p.last_run_at).getTime()
+        const daysAgo = (Date.now() - lastRun) / (1000 * 60 * 60 * 24)
+        if (daysAgo > 30) health = "stale"
+        else if (p.health_status === "failing") health = "failing"
+        else health = "healthy"
+      }
+
+      const icon = health === "healthy" ? "\x1b[32m●\x1b[0m"
+        : health === "stale" ? "\x1b[33m●\x1b[0m"
+        : health === "failing" ? "\x1b[31m●\x1b[0m"
+        : health === "missing" ? "\x1b[31m✗\x1b[0m"
+        : "\x1b[2m●\x1b[0m"
+
+      console.log(`  ${icon} ${p.name}`)
+      console.log(`    Path: ${p.path}${!exists ? " (MISSING)" : ""}`)
+      console.log(`    Domain: ${p.domain} | Metric: ${p.metric_name} (${p.metric_direction})`)
+      console.log(`    Git: ${p.is_git_repo ? "yes" : "no"}${p.git_remote ? ` (${p.git_remote})` : ""}`)
+      console.log(`    Experiments: ${p.total_experiments} | Cost: $${p.total_cost.toFixed(4)} | Last run: ${p.last_run_at ?? "never"}`)
+      console.log()
+
+      // Update health in registry
+      if (health !== "missing") {
+        updateProjectHealth(p.path, health as "healthy" | "stale" | "failing" | "unknown")
+      }
+    }
+
+    if (options.fix) {
+      console.log("Cleaning up...")
+      // Remove projects that no longer exist on disk
+      let removed = 0
+      for (const p of projects) {
+        const { existsSync } = require("node:fs")
+        if (!existsSync(getLocalDir(p.path))) {
+          const { unregisterProject } = await import("../storage/registry.ts")
+          unregisterProject(p.path)
+          removed++
+          console.log(`  Removed missing project: ${p.name}`)
+        }
+      }
+      if (removed === 0) console.log("  Nothing to clean up.")
     }
   })
 
