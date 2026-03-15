@@ -8,6 +8,7 @@
 import type { Database } from "bun:sqlite"
 import type { CycleDefinition, PhaseDefinition } from "../types.ts"
 import type { ProviderRouter } from "../providers/router.ts"
+import type { SandboxRouter, ResolveHints } from "../sandbox/router.ts"
 import { updateWorkspacePhase, updateWorkspaceStatus, addWorkspaceCost } from "../db/index.ts"
 import { runPhase, type PhaseContext, type PhaseResult } from "./phase-runner.ts"
 
@@ -25,6 +26,12 @@ export interface CycleRunnerConfig {
     previousKnowledge?: string
     userGoal?: string
   }
+  /** Optional sandbox router for running real experiments */
+  sandboxRouter?: SandboxRouter
+  /** Hints for sandbox creation (isGitRepo, repoPath, etc.) */
+  sandboxHints?: ResolveHints
+  /** Evaluation command to run in sandboxes */
+  evaluationCommand?: string
   onPhaseStart?: (phase: PhaseDefinition, index: number) => void
   onPhaseComplete?: (phase: PhaseDefinition, result: PhaseResult, index: number) => void
   onError?: (phase: PhaseDefinition, error: Error, index: number) => void
@@ -62,6 +69,13 @@ export async function runCycle(config: CycleRunnerConfig): Promise<CycleResult> 
         phase,
         accumulatedContext,
         previousResults: phaseResults,
+        // Sandbox context for experiment phases
+        sandboxRouter: config.sandboxRouter,
+        sandboxHints: config.sandboxHints,
+        evaluationCommand: config.evaluationCommand,
+        metricName: context.metricName,
+        metricDirection: context.metricDirection as "lower" | "higher",
+        projectDomain: context.domain,
       }
 
       const result = await runPhase(phaseContext)
@@ -94,8 +108,6 @@ export async function runCycle(config: CycleRunnerConfig): Promise<CycleResult> 
         model: "",
       })
 
-      // Decide whether to continue or abort
-      // For now, abort on error
       updateWorkspaceStatus(db, workspaceId, "failed")
       return {
         success: false,

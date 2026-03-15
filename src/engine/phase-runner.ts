@@ -12,8 +12,10 @@
 import type { Database } from "bun:sqlite"
 import type { PhaseDefinition } from "../types.ts"
 import type { ProviderRouter } from "../providers/router.ts"
+import type { SandboxRouter, ResolveHints } from "../sandbox/router.ts"
 import { logModelCall } from "../db/index.ts"
 import { saveKnowledge } from "./knowledge.ts"
+import { runParallelExperiments, type ExperimentHypothesis } from "./parallel.ts"
 
 export interface PhaseContext {
   db: Database
@@ -23,6 +25,18 @@ export interface PhaseContext {
   phase: PhaseDefinition
   accumulatedContext: string
   previousResults: PhaseResult[]
+  /** Optional sandbox router — required for parallel_experiment phases to actually execute */
+  sandboxRouter?: SandboxRouter
+  /** Hints for sandbox creation */
+  sandboxHints?: ResolveHints
+  /** Command to run for evaluation in sandboxes */
+  evaluationCommand?: string
+  /** Primary metric name */
+  metricName?: string
+  /** Metric direction */
+  metricDirection?: "lower" | "higher"
+  /** Project domain */
+  projectDomain?: string
 }
 
 export interface PhaseResult {
@@ -104,8 +118,6 @@ Provide your analysis in a structured format. Be specific and actionable.`
 // ─── Gather phase ────────────────────────────────────────────────────────────
 
 async function runGatherPhase(ctx: PhaseContext): Promise<PhaseResult> {
-  // In a full implementation, this would invoke skills (web-search, db-query, file-scan)
-  // For now, use LLM to simulate gathering
   const prompt = `You are a research assistant gathering information.
 
 ${ctx.accumulatedContext}
@@ -149,25 +161,28 @@ Gather and organize all relevant information. Include:
 // ─── Parallel experiment phase ───────────────────────────────────────────────
 
 async function runParallelExperimentPhase(ctx: PhaseContext): Promise<PhaseResult> {
-  // Step 1: Generate experiment hypotheses
   const numExperiments = ctx.phase.max_parallel
+
+  // Step 1: Generate experiment hypotheses via LLM
   const prompt = `Based on the research context below, propose exactly ${numExperiments} distinct experiment hypotheses.
 
 ${ctx.accumulatedContext}
 
 For each experiment, provide:
 1. A short hypothesis (one sentence)
-2. What specific change to make
+2. What specific change to make — provide the EXACT file content or code change
 3. Why this might work
 
-Format each as:
+Format EACH experiment EXACTLY as:
 EXPERIMENT N:
-Hypothesis: ...
-Change: ...
-Rationale: ...`
+Hypothesis: <one sentence>
+File: <filename to create/modify>
+Content: <exact file content>
+Rationale: <why this might work>`
 
   const result = await ctx.router.generate(prompt, ctx.phase.provider_hint, {
-    system: `You are an experimental researcher. Propose ${numExperiments} diverse, creative experiments. Each should test a different approach.`,
+    system: `You are an experimental researcher. Propose ${numExperiments} diverse, creative experiments. Each should test a different approach. For each experiment, provide exact file contents that can be written to a sandbox.`,
+    max_tokens: 8192,
   })
 
   logModelCall(ctx.db, {
@@ -181,23 +196,93 @@ Rationale: ...`
     phase: ctx.phase.name,
   })
 
-  // In a full implementation, this would:
-  // 1. Parse the hypotheses
-  // 2. Create sandboxes for each
-  // 3. Run experiments in parallel
-  // 4. Collect results
-  // For now, return the hypotheses as the result
+  // Step 2: Parse hypotheses from LLM output
+  const hypotheses = parseHypotheses(result.content)
 
+  // Step 3: If we have a sandbox router and evaluation command, actually run experiments
+  if (ctx.sandboxRouter && ctx.evaluationCommand && hypotheses.length > 0) {
+    const parallelResult = await runParallelExperiments({
+      db: ctx.db,
+      router: ctx.router,
+      sandboxRouter: ctx.sandboxRouter,
+      workspaceId: ctx.workspaceId,
+      projectId: ctx.projectId,
+      hypotheses,
+      sandboxHints: ctx.sandboxHints ?? {},
+      evaluationCommand: ctx.evaluationCommand,
+      metricName: ctx.metricName ?? "score",
+      metricDirection: ctx.metricDirection ?? "higher",
+      timeout: 300_000,
+    })
+
+    const experimentSummaries: ExperimentSummary[] = parallelResult.results.map((r) => ({
+      sandboxId: r.sandboxId,
+      hypothesis: r.hypothesis,
+      metrics: r.metrics,
+      decision: r.decision,
+    }))
+
+    const winnerSummary = parallelResult.winner
+      ? `Winner: "${parallelResult.winner.hypothesis}" with ${JSON.stringify(parallelResult.winner.metrics)}`
+      : "No winner found"
+
+    return {
+      phaseName: ctx.phase.name,
+      success: true,
+      summary: `Ran ${parallelResult.total} experiments: ${parallelResult.completed} completed, ${parallelResult.crashed} crashed. ${winnerSummary}`,
+      data: {
+        hypotheses: result.content,
+        results: parallelResult.results,
+        winner: parallelResult.winner,
+      },
+      cost: result.cost,
+      provider: result.provider_name,
+      model: result.model,
+      experiments: experimentSummaries,
+    }
+  }
+
+  // Fallback: no sandbox router — just return hypotheses (LLM-only mode)
   return {
     phaseName: ctx.phase.name,
     success: true,
-    summary: `Generated ${numExperiments} experiment hypotheses`,
+    summary: `Generated ${hypotheses.length} experiment hypotheses (no sandbox configured — LLM-only mode)`,
     data: result.content,
     cost: result.cost,
     provider: result.provider_name,
     model: result.model,
-    experiments: [], // Will be populated when sandbox integration is complete
+    experiments: [],
   }
+}
+
+/**
+ * Parse experiment hypotheses from LLM output into structured format.
+ */
+function parseHypotheses(output: string): ExperimentHypothesis[] {
+  const experiments: ExperimentHypothesis[] = []
+  // Split by EXPERIMENT N: pattern
+  const blocks = output.split(/EXPERIMENT\s+\d+\s*:/i).filter((b) => b.trim())
+
+  for (const block of blocks) {
+    const hypothesisMatch = block.match(/Hypothesis:\s*(.+)/i)
+    const fileMatch = block.match(/File:\s*(.+)/i)
+    const contentMatch = block.match(/Content:\s*([\s\S]*?)(?=Rationale:|EXPERIMENT|\s*$)/i)
+
+    const description = hypothesisMatch?.[1]?.trim()
+    const fileName = fileMatch?.[1]?.trim() ?? "experiment.txt"
+    const content = contentMatch?.[1]?.trim() ?? ""
+
+    if (description) {
+      experiments.push({
+        description,
+        changes: content
+          ? [{ path: fileName, content }]
+          : [],
+      })
+    }
+  }
+
+  return experiments
 }
 
 // ─── Synthesize phase ────────────────────────────────────────────────────────
@@ -234,17 +319,15 @@ Synthesize the results into:
 
   // Auto-save knowledge from synthesize output
   try {
-    // Extract the KEY INSIGHT or KNOWLEDGE line
     const insightMatch = result.content.match(/KEY INSIGHT[:\s]*\n?\s*\**(.+?)(?:\*\*|\n\n)/is)
       ?? result.content.match(/KNOWLEDGE:\s*(.+)/i)
     const insight = insightMatch?.[1]?.replace(/\*\*/g, "").trim() ?? result.content.slice(0, 500)
-    // Extract confidence — look for 0.XX pattern near "CONFIDENCE"
     const confidenceMatch = result.content.match(/CONFIDENCE[:\s]*\**\s*(0?\.\d+|\d\.\d+)/i)
     const confidence = confidenceMatch ? parseFloat(confidenceMatch[1]!) : 0.5
 
     saveKnowledge(ctx.db, {
       project_id: ctx.projectId,
-      domain: "general",
+      domain: ctx.projectDomain ?? "general",
       insight,
       confidence: Math.min(1, Math.max(0, confidence)),
       tags: ["auto-generated", ctx.phase.name],
@@ -267,7 +350,6 @@ Synthesize the results into:
 // ─── Escalate phase ──────────────────────────────────────────────────────────
 
 async function runEscalatePhase(ctx: PhaseContext): Promise<PhaseResult> {
-  // Get the previous phase's output to refine
   const lastResult = ctx.previousResults[ctx.previousResults.length - 1]
   const previousOutput = lastResult
     ? typeof lastResult.data === "string"
@@ -317,3 +399,5 @@ Refine the original analysis:
     model: result.model,
   }
 }
+
+export { parseHypotheses }

@@ -109,6 +109,12 @@ export function listProjects(db: Database) {
   return db.query("SELECT * FROM projects ORDER BY created_at DESC").all()
 }
 
+export function deleteProject(db: Database, id: string): boolean {
+  // CASCADE handles workspaces, sandboxes, results, pflk_cycles, gree_phases
+  const result = db.run("DELETE FROM projects WHERE id = ?", [id])
+  return result.changes > 0
+}
+
 // ─── Workspace queries ───────────────────────────────────────────────────────
 
 export function createWorkspace(
@@ -151,6 +157,11 @@ export function updateWorkspaceStatus(db: Database, id: string, status: string) 
     status,
     id,
   ])
+}
+
+export function deleteWorkspace(db: Database, id: string): boolean {
+  const result = db.run("DELETE FROM workspaces WHERE id = ?", [id])
+  return result.changes > 0
 }
 
 export function addWorkspaceCost(db: Database, id: string, cost: number) {

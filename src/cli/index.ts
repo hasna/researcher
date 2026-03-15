@@ -5,7 +5,7 @@
  */
 
 import { Command } from "commander"
-import { initDb, createProject, listProjects, getProject, getProjectByName, createWorkspace, listWorkspaces, getWorkspace, listResults } from "../db/index.ts"
+import { initDb, createProject, listProjects, getProject, getProjectByName, deleteProject, createWorkspace, listWorkspaces, getWorkspace, listResults, updateWorkspaceStatus, deleteWorkspace } from "../db/index.ts"
 import { loadConfig, saveConfig, ensureConfigDir, getDbPath } from "../config/index.ts"
 import { CycleRegistry } from "../cycles/registry.ts"
 import { exportKnowledgeMarkdown, queryKnowledge } from "../engine/knowledge.ts"
@@ -19,6 +19,19 @@ program
   .name("researcher")
   .description("Universal autonomous experimentation framework")
   .version("0.0.1")
+  .option("--json", "Output as JSON for scripting/piping")
+
+function isJson(): boolean {
+  return program.opts().json === true
+}
+
+function output(data: unknown, formatted?: () => void): void {
+  if (isJson()) {
+    console.log(JSON.stringify(data, null, 2))
+  } else if (formatted) {
+    formatted()
+  }
+}
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 
@@ -78,6 +91,7 @@ projectCmd
     const db = initDb(getDbPath())
     try {
       const projects = listProjects(db) as Record<string, unknown>[]
+      if (isJson()) { console.log(JSON.stringify(projects, null, 2)); return }
       if (projects.length === 0) {
         console.log("No projects. Create one with: researcher project new <name>")
         return
@@ -103,6 +117,7 @@ projectCmd
         console.error(`Project not found: ${name}`)
         process.exit(1)
       }
+      if (isJson()) { console.log(JSON.stringify(project, null, 2)); return }
       console.log(`Project: ${project.name}`)
       console.log(`  ID: ${project.id}`)
       console.log(`  Type: ${project.type}`)
@@ -115,6 +130,36 @@ projectCmd
     }
   })
 
+projectCmd
+  .command("delete")
+  .argument("<name>", "Project name or ID")
+  .option("-y, --yes", "Skip confirmation")
+  .description("Delete a project and all its data")
+  .action(async (name, options) => {
+    const db = initDb(getDbPath())
+    try {
+      const project = (getProjectByName(db, name) ?? getProject(db, name)) as Record<string, unknown> | null
+      if (!project) {
+        console.error(`Project not found: ${name}`)
+        process.exit(1)
+      }
+      if (!options.yes) {
+        process.stdout.write(`Delete project "${project.name}" and all its data? (y/n) `)
+        const buf = Buffer.alloc(10)
+        const n = require("fs").readSync(0, buf, 0, 10, null)
+        const answer = buf.toString("utf-8", 0, n).trim().toLowerCase()
+        if (answer !== "y" && answer !== "yes") {
+          console.log("Cancelled.")
+          return
+        }
+      }
+      deleteProject(db, project.id as string)
+      console.log(`Deleted project: ${project.name}`)
+    } finally {
+      db.close()
+    }
+  })
+
 // ─── Run ─────────────────────────────────────────────────────────────────────
 
 program
@@ -122,6 +167,9 @@ program
   .argument("<project>", "Project name or ID")
   .option("--cycle <cycle>", "Cycle to use (pflk, gree, etc.)", "pflk")
   .option("--parallel <n>", "Max parallel experiments", "10")
+  .option("--goal <description>", "Research goal — what you're trying to achieve")
+  .option("--provider <name>", "Override provider for experiment phase (anthropic, openai, cerebras, local)")
+  .option("--dry-run", "Preview which providers/models will be used without running")
   .description("Start a research workspace and run experiments")
   .action(async (projectName, options) => {
     const config = loadConfig()
@@ -158,9 +206,38 @@ program
         openai: config.providers.openai ? { apiKey: config.providers.openai.api_key } : undefined,
         cerebras: config.providers.cerebras ? { apiKey: config.providers.cerebras.api_key } : undefined,
         local: config.providers.local ? { baseUrl: config.providers.local.base_url, model: config.providers.local.default_model } : undefined,
+        ...(options.provider ? { default_hint: undefined } : {}),
       })
 
-      console.log(`Providers: ${router.listProviders().join(", ")}\n`)
+      if (options.provider && !router.hasProvider(options.provider)) {
+        console.error(`Provider not available: ${options.provider}. Available: ${router.listProviders().join(", ")}`)
+        process.exit(1)
+      }
+
+      console.log(`Providers: ${router.listProviders().join(", ")}${options.provider ? ` (experiment override: ${options.provider})` : ""}\n`)
+      if (options.goal) console.log(`Goal: ${options.goal}\n`)
+
+      // Dry run — preview only
+      if (options.dryRun) {
+        console.log("DRY RUN — no LLM calls will be made\n")
+        for (let i = 0; i < cycle.phases.length; i++) {
+          const phase = cycle.phases[i]!
+          const resolved = router.resolve(phase.provider_hint)
+          const estCost = phase.type === "parallel_experiment"
+            ? `~$${(resolved.estimateCost(2000, 1000) * parseInt(options.parallel)).toFixed(4)}`
+            : `~$${resolved.estimateCost(2000, 1000).toFixed(4)}`
+          console.log(`  [${i + 1}] ${phase.name} (${phase.type})`)
+          console.log(`      Provider: ${resolved.name} | Hint: ${phase.provider_hint} | Est. cost: ${estCost}`)
+          if (phase.skills.length > 0) console.log(`      Skills: ${phase.skills.join(", ")}`)
+          if (phase.max_parallel > 1) console.log(`      Parallel: ${phase.max_parallel} experiments`)
+        }
+        console.log(`\nTotal estimated cost: ~$${cycle.phases.reduce((sum, p) => {
+          const r = router.resolve(p.provider_hint)
+          const base = r.estimateCost(2000, 1000)
+          return sum + (p.type === "parallel_experiment" ? base * parseInt(options.parallel) : base)
+        }, 0).toFixed(4)}`)
+        return
+      }
 
       // Run cycle
       const result = await runCycle({
@@ -174,6 +251,7 @@ program
           domain: project.domain as string,
           metricName: project.metric_name as string,
           metricDirection: project.metric_direction as string,
+          userGoal: options.goal,
         },
         onPhaseStart: (phase, i) => {
           console.log(`[${i + 1}/${cycle.phases.length}] Starting phase: ${phase.name} (${phase.type}, ${phase.provider_hint})`)
@@ -189,6 +267,89 @@ program
       console.log(`Phases: ${result.phases.length}`)
       console.log(`Total cost: $${result.totalCost.toFixed(4)}`)
       if (result.error) console.log(`Error: ${result.error}`)
+    } finally {
+      db.close()
+    }
+  })
+
+// ─── Workspace ───────────────────────────────────────────────────────────────
+
+const workspaceCmd = program.command("workspace").description("Manage research workspaces")
+
+workspaceCmd
+  .command("list")
+  .option("--project <name>", "Filter by project name")
+  .option("--status <status>", "Filter by status (running, paused, completed, failed)")
+  .description("List workspaces")
+  .action(async (options) => {
+    const db = initDb(getDbPath())
+    try {
+      let workspaces = listWorkspaces(db, options.status) as Record<string, unknown>[]
+      if (options.project) {
+        const project = (getProjectByName(db, options.project) ?? getProject(db, options.project)) as Record<string, unknown> | null
+        if (project) {
+          workspaces = workspaces.filter((ws) => ws.project_id === project.id)
+        }
+      }
+      if (workspaces.length === 0) {
+        console.log("No workspaces found.")
+        return
+      }
+      console.log(`${workspaces.length} workspace(s):\n`)
+      for (const ws of workspaces) {
+        console.log(`  ${ws.id}  [${ws.status}]  cycle:${ws.cycle_id}  phase:${ws.current_phase ?? "-"}  $${(ws.cost_total as number).toFixed(4)}`)
+      }
+    } finally {
+      db.close()
+    }
+  })
+
+workspaceCmd
+  .command("delete")
+  .argument("<id>", "Workspace ID")
+  .description("Delete a workspace and all its data")
+  .action(async (id) => {
+    const db = initDb(getDbPath())
+    try {
+      if (deleteWorkspace(db, id)) {
+        console.log(`Deleted workspace: ${id}`)
+      } else {
+        console.error(`Workspace not found: ${id}`)
+      }
+    } finally {
+      db.close()
+    }
+  })
+
+workspaceCmd
+  .command("pause")
+  .argument("<id>", "Workspace ID")
+  .description("Pause a running workspace")
+  .action(async (id) => {
+    const db = initDb(getDbPath())
+    try {
+      const ws = getWorkspace(db, id) as Record<string, unknown> | null
+      if (!ws) { console.error(`Workspace not found: ${id}`); process.exit(1) }
+      if (ws.status !== "running") { console.error(`Workspace is not running (status: ${ws.status})`); process.exit(1) }
+      updateWorkspaceStatus(db, id, "paused")
+      console.log(`Paused workspace: ${id}`)
+    } finally {
+      db.close()
+    }
+  })
+
+workspaceCmd
+  .command("resume")
+  .argument("<id>", "Workspace ID")
+  .description("Resume a paused workspace")
+  .action(async (id) => {
+    const db = initDb(getDbPath())
+    try {
+      const ws = getWorkspace(db, id) as Record<string, unknown> | null
+      if (!ws) { console.error(`Workspace not found: ${id}`); process.exit(1) }
+      if (ws.status !== "paused") { console.error(`Workspace is not paused (status: ${ws.status})`); process.exit(1) }
+      updateWorkspaceStatus(db, id, "running")
+      console.log(`Resumed workspace: ${id}`)
     } finally {
       db.close()
     }
@@ -222,13 +383,13 @@ program
       } else {
         const rm = new ResourceManager()
         const status = rm.getStatus(db)
+        const workspaces = listWorkspaces(db) as Record<string, unknown>[]
+        if (isJson()) { console.log(JSON.stringify({ status, workspaces }, null, 2)); return }
         console.log("Researcher Status")
         console.log(`  Active sandboxes: ${status.activeSandboxes}/${status.maxSandboxes}`)
         console.log(`  Hourly cost: $${status.hourlyCost.toFixed(4)} / $${status.maxHourlyCost}`)
         console.log(`  Daily cost: $${status.dailyCost.toFixed(4)}`)
         console.log(`  Budget: ${status.withinBudget ? "OK" : "EXCEEDED"}\n`)
-
-        const workspaces = listWorkspaces(db) as Record<string, unknown>[]
         if (workspaces.length === 0) {
           console.log("No workspaces. Start one with: researcher run <project>")
         } else {
@@ -238,6 +399,41 @@ program
           }
         }
       }
+    } finally {
+      db.close()
+    }
+  })
+
+// ─── Cost ────────────────────────────────────────────────────────────────────
+
+program
+  .command("cost")
+  .option("--workspace <id>", "Filter by workspace")
+  .option("--today", "Show today's costs only")
+  .description("Show cost breakdown by provider and model")
+  .action(async (options) => {
+    const db = initDb(getDbPath())
+    try {
+      const rm = new ResourceManager()
+      if (options.today) {
+        console.log(`Today's cost: $${rm.getDailyCost(db).toFixed(4)}`)
+        console.log(`This hour: $${rm.getHourlyCost(db).toFixed(4)}\n`)
+      }
+
+      const summary = rm.getCostSummary(db, options.workspace) as Record<string, unknown>[]
+      if (summary.length === 0) {
+        console.log("No costs recorded yet.")
+        return
+      }
+      console.log("Cost by provider/model:\n")
+      let total = 0
+      for (const row of summary) {
+        const cost = row.total_cost as number
+        total += cost
+        console.log(`  ${row.provider}/${row.model}`)
+        console.log(`    Cost: $${cost.toFixed(4)} | Calls: ${row.call_count} | Tokens: ${row.total_tokens_in}in/${row.total_tokens_out}out`)
+      }
+      console.log(`\nTotal: $${total.toFixed(4)}`)
     } finally {
       db.close()
     }

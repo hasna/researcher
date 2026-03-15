@@ -51,6 +51,7 @@ export {
   createResult,
   listResults,
   getBestResult,
+  deleteProject,
   logModelCall,
   getCostSummary,
 } from "../db/index.ts"
@@ -58,7 +59,7 @@ export {
 // ─── Engine ──────────────────────────────────────────────────────────────────
 
 export { runCycle, type CycleRunnerConfig, type CycleResult } from "../engine/cycle-runner.ts"
-export { runPhase, type PhaseContext, type PhaseResult } from "../engine/phase-runner.ts"
+export { runPhase, parseHypotheses, type PhaseContext, type PhaseResult } from "../engine/phase-runner.ts"
 export { runParallelExperiments, parseMetrics, type ParallelRunConfig, type ParallelRunResult } from "../engine/parallel.ts"
 export { saveKnowledge, queryKnowledge, getCrossProjectKnowledge, updateKnowledgeConfidence, exportKnowledgeMarkdown } from "../engine/knowledge.ts"
 export { startPFLK, recordFeedback, recordLoopholes, recordKnowledge, getPFLKHistory, getLoopholeSuccessRate, getKnowledgeFromPFLK } from "../engine/pflk.ts"
