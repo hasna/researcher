@@ -80,9 +80,41 @@ export class ProviderRouter {
     hint: PhaseDefinition["provider_hint"],
     options?: GenerateOptions,
   ): Promise<GenerateResult & { provider_name: string }> {
-    const provider = this.resolve(hint)
-    const result = await provider.generate(prompt, options)
-    return { ...result, provider_name: provider.name }
+    const actualHint = hint === "user_choice" ? this.defaultHint : hint
+    const preferences = HINT_PREFERENCES[actualHint]
+
+    // Try each provider in preference order with fallback
+    const errors: string[] = []
+    for (const pref of preferences) {
+      const provider = this.providers.get(pref.name)
+      if (!provider) continue
+
+      try {
+        const opts = pref.model ? { ...options, model: pref.model } : options
+        const result = await provider.generate(prompt, opts)
+        if (errors.length > 0) {
+          console.error(`[researcher] Fell back to ${provider.name} after ${errors.length} provider(s) failed`)
+        }
+        return { ...result, provider_name: provider.name }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        errors.push(`${pref.name}: ${msg}`)
+
+        // For rate limits (429), wait briefly and retry same provider once
+        if (msg.includes("429") || msg.includes("rate")) {
+          try {
+            await new Promise(r => setTimeout(r, 2000))
+            const opts = pref.model ? { ...options, model: pref.model } : options
+            const result = await provider.generate(prompt, opts)
+            return { ...result, provider_name: provider.name }
+          } catch {
+            // Continue to next provider
+          }
+        }
+      }
+    }
+
+    throw new Error(`All providers failed:\n${errors.join("\n")}`)
   }
 
   /**

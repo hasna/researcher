@@ -13,6 +13,7 @@ import type { Database } from "bun:sqlite"
 import type { PhaseDefinition } from "../types.ts"
 import type { ProviderRouter } from "../providers/router.ts"
 import type { SandboxRouter, ResolveHints } from "../sandbox/router.ts"
+import type { SkillRegistry } from "../skills/registry.ts"
 import { logModelCall } from "../db/index.ts"
 import { saveKnowledge } from "./knowledge.ts"
 import { runParallelExperiments, type ExperimentHypothesis } from "./parallel.ts"
@@ -37,6 +38,8 @@ export interface PhaseContext {
   metricDirection?: "lower" | "higher"
   /** Project domain */
   projectDomain?: string
+  /** Optional skill registry for invoking skills during gather phase */
+  skillRegistry?: SkillRegistry
 }
 
 export interface PhaseResult {
@@ -118,12 +121,34 @@ Provide your analysis in a structured format. Be specific and actionable.`
 // ─── Gather phase ────────────────────────────────────────────────────────────
 
 async function runGatherPhase(ctx: PhaseContext): Promise<PhaseResult> {
+  // Step 1: Invoke available skills to gather real data
+  let skillOutputs = ""
+  if (ctx.skillRegistry && ctx.phase.skills.length > 0) {
+    for (const skillName of ctx.phase.skills) {
+      const skill = ctx.skillRegistry.get(skillName)
+      if (!skill) continue
+      try {
+        const skillResult = await skill.execute({
+          context: ctx.accumulatedContext,
+          parameters: { query: ctx.accumulatedContext.slice(0, 500), type: "gather" },
+        })
+        if (skillResult.success && skillResult.summary) {
+          skillOutputs += `\n### Skill: ${skillName}\n${skillResult.summary}\n`
+        }
+      } catch {
+        // Skill failure is non-critical
+      }
+    }
+  }
+
+  // Step 2: Send accumulated context + skill outputs to LLM for synthesis
   const prompt = `You are a research assistant gathering information.
 
 ${ctx.accumulatedContext}
+${skillOutputs ? `\n## Data from skills:\n${skillOutputs}` : ""}
 
 Phase goal: ${ctx.phase.description}
-Skills available: ${ctx.phase.skills.join(", ") || "none"}
+Skills used: ${ctx.phase.skills.join(", ") || "none"}
 Expected output: ${ctx.phase.output}
 
 Gather and organize all relevant information. Include:

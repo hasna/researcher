@@ -32,6 +32,8 @@ export interface CycleRunnerConfig {
   sandboxHints?: ResolveHints
   /** Evaluation command to run in sandboxes */
   evaluationCommand?: string
+  /** Resume from this phase index (skip earlier phases) */
+  resumeFromPhase?: number
   onPhaseStart?: (phase: PhaseDefinition, index: number) => void
   onPhaseComplete?: (phase: PhaseDefinition, result: PhaseResult, index: number) => void
   onError?: (phase: PhaseDefinition, error: Error, index: number) => void
@@ -53,7 +55,23 @@ export async function runCycle(config: CycleRunnerConfig): Promise<CycleResult> 
   let totalCost = 0
   let accumulatedContext = buildInitialContext(context)
 
-  for (let i = 0; i < cycle.phases.length; i++) {
+  const startPhase = config.resumeFromPhase ?? 0
+  if (startPhase > 0) {
+    // Mark skipped phases
+    for (let s = 0; s < startPhase && s < cycle.phases.length; s++) {
+      phaseResults.push({
+        phaseName: cycle.phases[s]!.name,
+        success: true,
+        summary: "(skipped — resumed)",
+        data: null,
+        cost: 0,
+        provider: "",
+        model: "",
+      })
+    }
+  }
+
+  for (let i = startPhase; i < cycle.phases.length; i++) {
     const phase = cycle.phases[i]!
 
     // Update workspace state

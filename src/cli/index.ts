@@ -170,6 +170,8 @@ program
   .option("--goal <description>", "Research goal — what you're trying to achieve")
   .option("--provider <name>", "Override provider for experiment phase (anthropic, openai, cerebras, local)")
   .option("--dry-run", "Preview which providers/models will be used without running")
+  .option("--continuous", "Run cycles in a loop until stopped (Ctrl+C)")
+  .option("--resume <workspace>", "Resume a failed workspace from the last successful phase")
   .description("Start a research workspace and run experiments")
   .action(async (projectName, options) => {
     const config = loadConfig()
@@ -190,12 +192,30 @@ program
         process.exit(1)
       }
 
-      // Create workspace
-      const wsId = createWorkspace(db, {
-        project_id: project.id as string,
-        cycle_id: cycle.id,
-        config: { parallel: parseInt(options.parallel) },
-      })
+      // Create or resume workspace
+      let wsId: string
+      let resumeFromPhase: number | undefined
+      if (options.resume) {
+        const existingWs = getWorkspace(db, options.resume) as Record<string, unknown> | null
+        if (!existingWs) { console.error(`Workspace not found: ${options.resume}`); process.exit(1) }
+        if (existingWs.status !== "failed" && existingWs.status !== "paused") {
+          console.error(`Workspace is not failed/paused (status: ${existingWs.status}). Can only resume failed or paused workspaces.`)
+          process.exit(1)
+        }
+        wsId = options.resume
+        // Find which phase to resume from
+        const failedPhase = existingWs.current_phase as string
+        resumeFromPhase = cycle.phases.findIndex(p => p.name === failedPhase)
+        if (resumeFromPhase < 0) resumeFromPhase = 0
+        updateWorkspaceStatus(db, wsId, "running")
+        console.log(`Resuming workspace ${wsId} from phase "${failedPhase}" (index ${resumeFromPhase})`)
+      } else {
+        wsId = createWorkspace(db, {
+          project_id: project.id as string,
+          cycle_id: cycle.id,
+          config: { parallel: parseInt(options.parallel) },
+        })
+      }
 
       console.log(`Starting ${cycle.name} cycle on "${project.name}" (workspace: ${wsId})`)
       console.log(`Phases: ${cycle.phases.map(p => p.name).join(" → ")}\n`)
@@ -239,34 +259,70 @@ program
         return
       }
 
-      // Run cycle
-      const result = await runCycle({
-        db,
-        router,
-        workspaceId: wsId,
-        projectId: project.id as string,
-        cycle,
-        context: {
-          projectName: project.name as string,
-          domain: project.domain as string,
-          metricName: project.metric_name as string,
-          metricDirection: project.metric_direction as string,
-          userGoal: options.goal,
-        },
-        onPhaseStart: (phase, i) => {
-          console.log(`[${i + 1}/${cycle.phases.length}] Starting phase: ${phase.name} (${phase.type}, ${phase.provider_hint})`)
-        },
-        onPhaseComplete: (phase, phaseResult, i) => {
-          console.log(`[${i + 1}/${cycle.phases.length}] Completed: ${phase.name} — $${phaseResult.cost.toFixed(4)} (${phaseResult.provider}/${phaseResult.model})`)
-          console.log(`  ${phaseResult.summary.slice(0, 200)}...\n`)
-        },
-      })
+      // Continuous mode — loop until Ctrl+C
+      let stopped = false
+      if (options.continuous) {
+        process.on("SIGINT", () => { stopped = true; console.log("\nStopping after current cycle...") })
+      }
 
-      console.log(`\n${"─".repeat(60)}`)
-      console.log(`Cycle ${result.success ? "COMPLETED" : "FAILED"}`)
-      console.log(`Phases: ${result.phases.length}`)
-      console.log(`Total cost: $${result.totalCost.toFixed(4)}`)
-      if (result.error) console.log(`Error: ${result.error}`)
+      let cycleNum = 0
+      let previousKnowledge = ""
+      do {
+        cycleNum++
+        if (cycleNum > 1) {
+          // Create a new workspace for each loop iteration
+          const newWsId = createWorkspace(db, { project_id: project.id as string, cycle_id: cycle.id, config: { parallel: parseInt(options.parallel) } })
+          console.log(`\n${"═".repeat(60)}\nContinuous cycle #${cycleNum} (workspace: ${newWsId})\n`)
+          var currentWsId = newWsId
+        } else {
+          var currentWsId = wsId
+        }
+
+        // Check budget
+        const rm = new ResourceManager()
+        if (!rm.isWithinBudget(db)) {
+          console.log("Hourly budget exceeded. Waiting 60s...")
+          await new Promise((r) => setTimeout(r, 60_000))
+          if (stopped) break
+          continue
+        }
+
+        const result = await runCycle({
+          db,
+          router,
+          workspaceId: currentWsId,
+          projectId: project.id as string,
+          cycle,
+          resumeFromPhase: cycleNum === 1 ? resumeFromPhase : undefined,
+          context: {
+            projectName: project.name as string,
+            domain: project.domain as string,
+            metricName: project.metric_name as string,
+            metricDirection: project.metric_direction as string,
+            userGoal: options.goal,
+            previousKnowledge: previousKnowledge || undefined,
+          },
+          onPhaseStart: (phase, i) => {
+            console.log(`[${i + 1}/${cycle.phases.length}] Starting phase: ${phase.name} (${phase.type}, ${phase.provider_hint})`)
+          },
+          onPhaseComplete: (phase, phaseResult, i) => {
+            console.log(`[${i + 1}/${cycle.phases.length}] Completed: ${phase.name} — $${phaseResult.cost.toFixed(4)} (${phaseResult.provider}/${phaseResult.model})`)
+            console.log(`  ${phaseResult.summary.slice(0, 200)}...\n`)
+          },
+        })
+
+        console.log(`\n${"─".repeat(60)}`)
+        console.log(`Cycle ${result.success ? "COMPLETED" : "FAILED"}`)
+        console.log(`Phases: ${result.phases.length}`)
+        console.log(`Total cost: $${result.totalCost.toFixed(4)}`)
+        if (result.error) console.log(`Error: ${result.error}`)
+
+        // Feed knowledge forward for continuous mode
+        const lastPhase = result.phases[result.phases.length - 1]
+        if (lastPhase?.data && typeof lastPhase.data === "string") {
+          previousKnowledge = lastPhase.data.slice(0, 2000)
+        }
+      } while (options.continuous && !stopped)
     } finally {
       db.close()
     }
@@ -404,6 +460,44 @@ program
     }
   })
 
+// ─── History ─────────────────────────────────────────────────────────────────
+
+program
+  .command("history")
+  .argument("<project>", "Project name or ID")
+  .option("--limit <n>", "Limit results", "20")
+  .description("Show experiment history for a project")
+  .action(async (projectName, options) => {
+    const db = initDb(getDbPath())
+    try {
+      const project = (getProjectByName(db, projectName) ?? getProject(db, projectName)) as Record<string, unknown> | null
+      if (!project) { console.error(`Project not found: ${projectName}`); process.exit(1) }
+
+      const workspaces = (listWorkspaces(db) as Record<string, unknown>[])
+        .filter(ws => ws.project_id === project.id)
+        .slice(0, parseInt(options.limit))
+
+      if (isJson()) { console.log(JSON.stringify(workspaces, null, 2)); return }
+
+      if (workspaces.length === 0) {
+        console.log(`No history for project "${project.name}".`)
+        return
+      }
+
+      console.log(`History for "${project.name}" (${workspaces.length} runs):\n`)
+      for (const ws of workspaces) {
+        const status = ws.status === "completed" ? "OK" : ws.status === "failed" ? "FAIL" : String(ws.status).toUpperCase()
+        console.log(`  ${ws.created_at}  ${ws.id}  [${status}]  ${ws.cycle_id}  phase:${ws.current_phase ?? "-"}  $${(ws.cost_total as number).toFixed(4)}`)
+      }
+
+      const totalCost = workspaces.reduce((sum, ws) => sum + (ws.cost_total as number), 0)
+      const completed = workspaces.filter(ws => ws.status === "completed").length
+      console.log(`\nTotal: ${workspaces.length} runs, ${completed} completed, $${totalCost.toFixed(4)}`)
+    } finally {
+      db.close()
+    }
+  })
+
 // ─── Cost ────────────────────────────────────────────────────────────────────
 
 program
@@ -479,6 +573,79 @@ program
     }
   })
 
+// ─── Templates ───────────────────────────────────────────────────────────────
+
+const templateCmd = program.command("template").description("Manage project templates")
+
+templateCmd
+  .command("list")
+  .description("List available templates")
+  .action(async () => {
+    const { readdirSync, readFileSync } = require("node:fs")
+    const { join } = require("node:path")
+    const templatesDir = join(import.meta.dir, "../../templates")
+    try {
+      const dirs = readdirSync(templatesDir, { withFileTypes: true })
+        .filter((d: { isDirectory: () => boolean }) => d.isDirectory())
+      if (dirs.length === 0) { console.log("No templates found."); return }
+      console.log(`${dirs.length} template(s):\n`)
+      for (const dir of dirs) {
+        const yamlPath = join(templatesDir, dir.name, "template.yaml")
+        try {
+          const { parse } = require("yaml")
+          const meta = parse(readFileSync(yamlPath, "utf-8"))
+          console.log(`  ${dir.name}`)
+          console.log(`    Domain: ${meta.domain ?? "general"} | Metric: ${meta.default_metric ?? "score"} (${meta.default_metric_direction ?? "higher"})`)
+          console.log(`    Cycle: ${meta.suggested_cycle ?? "pflk"} | ${meta.description?.slice(0, 100) ?? ""}`)
+          console.log()
+        } catch {
+          console.log(`  ${dir.name} (no template.yaml)`)
+        }
+      }
+    } catch {
+      console.log("Templates directory not found.")
+    }
+  })
+
+templateCmd
+  .command("use")
+  .argument("<template>", "Template name")
+  .argument("<dir>", "Target directory")
+  .description("Scaffold a project from a template")
+  .action(async (template, dir) => {
+    const { cpSync, existsSync, mkdirSync, readFileSync } = require("node:fs")
+    const { join } = require("node:path")
+    const templatesDir = join(import.meta.dir, "../../templates")
+    const srcDir = join(templatesDir, template)
+    if (!existsSync(srcDir)) {
+      console.error(`Template not found: ${template}`)
+      process.exit(1)
+    }
+    mkdirSync(dir, { recursive: true })
+    cpSync(srcDir, dir, { recursive: true })
+    console.log(`Scaffolded "${template}" template into ${dir}`)
+
+    // Read template metadata and create project
+    try {
+      const { parse } = require("yaml")
+      const meta = parse(readFileSync(join(srcDir, "template.yaml"), "utf-8"))
+      const db = initDb(getDbPath())
+      const name = require("node:path").basename(dir)
+      const id = createProject(db, {
+        name,
+        type: "directory",
+        path: require("node:path").resolve(dir),
+        domain: meta.domain ?? "general",
+        metric_name: meta.default_metric ?? "score",
+        metric_direction: meta.default_metric_direction ?? "higher",
+      })
+      db.close()
+      console.log(`Created project: ${name} (${id})`)
+    } catch {
+      console.log("Note: Could not auto-create project. Use 'researcher project new' manually.")
+    }
+  })
+
 // ─── Cycles ──────────────────────────────────────────────────────────────────
 
 program
@@ -510,6 +677,214 @@ program
     for (const s of skills) {
       console.log(`  ${s.name} — ${s.description}`)
       console.log(`    Domains: ${s.domains.join(", ")} | Phases: ${s.phases.join(", ")} | Cost: ${s.cost_per_run}`)
+    }
+  })
+
+// ─── Benchmark ───────────────────────────────────────────────────────────────
+
+program
+  .command("benchmark")
+  .argument("<project>", "Project name or ID")
+  .option("--command <cmd>", "Evaluation command (overrides project config)")
+  .option("--save", "Save result to database")
+  .description("Run a quick benchmark without a full cycle")
+  .action(async (projectName, options) => {
+    const db = initDb(getDbPath())
+    try {
+      const project = (getProjectByName(db, projectName) ?? getProject(db, projectName)) as Record<string, unknown> | null
+      if (!project) { console.error(`Project not found: ${projectName}`); process.exit(1) }
+
+      const config = JSON.parse((project.config as string) ?? "{}")
+      const command = options.command ?? config.evaluation_command
+      if (!command) {
+        console.error("No evaluation command. Use --command or set evaluation_command in project config.")
+        process.exit(1)
+      }
+
+      console.log(`Running benchmark for "${project.name}"...`)
+      console.log(`Command: ${command}\n`)
+
+      const start = performance.now()
+      const proc = Bun.spawn(["sh", "-c", command], {
+        cwd: (project.path as string) ?? process.cwd(),
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const stdout = await new Response(proc.stdout).text()
+      const stderr = await new Response(proc.stderr).text()
+      const exitCode = await proc.exited
+      const elapsed = ((performance.now() - start) / 1000).toFixed(1)
+
+      if (exitCode !== 0) {
+        console.error(`Benchmark failed (exit ${exitCode}):\n${stderr}`)
+        process.exit(1)
+      }
+
+      const { parseMetrics } = await import("../engine/parallel.ts")
+      const metrics = parseMetrics(stdout, project.metric_name as string)
+
+      if (isJson()) { console.log(JSON.stringify({ metrics, elapsed_seconds: parseFloat(elapsed), exitCode }, null, 2)); return }
+
+      console.log(`Results (${elapsed}s):\n`)
+      for (const [k, v] of Object.entries(metrics)) {
+        console.log(`  ${k}: ${v}`)
+      }
+
+      if (options.save) {
+        const { createWorkspace: cw, createSandbox: cs, createResult: cr } = await import("../db/index.ts")
+        const wsId = cw(db, { project_id: project.id as string, cycle_id: "benchmark" })
+        const sbId = cs(db, { workspace_id: wsId, type: "tempdir", hypothesis: "baseline benchmark" })
+        cr(db, { sandbox_id: sbId, workspace_id: wsId, metrics, decision: "keep", provider: "local", model: "benchmark" })
+        console.log(`\nSaved to workspace: ${wsId}`)
+      }
+    } finally {
+      db.close()
+    }
+  })
+
+// ─── Export ──────────────────────────────────────────────────────────────────
+
+program
+  .command("export")
+  .argument("<project>", "Project name or ID")
+  .option("--format <fmt>", "Output format (md, json)", "md")
+  .description("Export all project data as a report")
+  .action(async (projectName, options) => {
+    const db = initDb(getDbPath())
+    try {
+      const project = (getProjectByName(db, projectName) ?? getProject(db, projectName)) as Record<string, unknown> | null
+      if (!project) { console.error(`Project not found: ${projectName}`); process.exit(1) }
+
+      const workspaces = (listWorkspaces(db) as Record<string, unknown>[]).filter(ws => ws.project_id === project.id)
+      const knowledge = queryKnowledge(db, { project_id: project.id as string })
+
+      if (options.format === "json") {
+        console.log(JSON.stringify({ project, workspaces, knowledge }, null, 2))
+        return
+      }
+
+      // Markdown export
+      let md = `# Research Report: ${project.name}\n\n`
+      md += `- **Domain**: ${project.domain}\n`
+      md += `- **Metric**: ${project.metric_name} (${project.metric_direction})\n`
+      md += `- **Type**: ${project.type}\n`
+      md += `- **Created**: ${project.created_at}\n\n`
+
+      md += `## Workspaces (${workspaces.length})\n\n`
+      for (const ws of workspaces) {
+        md += `### ${ws.id}\n`
+        md += `- Cycle: ${ws.cycle_id} | Status: ${ws.status} | Cost: $${(ws.cost_total as number).toFixed(4)}\n`
+        md += `- Phase: ${ws.current_phase ?? "-"} | Created: ${ws.created_at}\n\n`
+      }
+
+      if (knowledge.length > 0) {
+        md += `## Knowledge (${knowledge.length})\n\n`
+        for (const k of knowledge) {
+          md += `### [${(k.confidence * 100).toFixed(0)}%] ${k.insight.slice(0, 200)}\n`
+          md += `- Domain: ${k.domain} | Tags: ${k.tags.join(", ") || "none"}\n\n`
+        }
+      }
+
+      const totalCost = workspaces.reduce((sum, ws) => sum + (ws.cost_total as number), 0)
+      md += `## Summary\n\n`
+      md += `- Total runs: ${workspaces.length}\n`
+      md += `- Completed: ${workspaces.filter(ws => ws.status === "completed").length}\n`
+      md += `- Total cost: $${totalCost.toFixed(4)}\n`
+      md += `- Knowledge entries: ${knowledge.length}\n`
+
+      console.log(md)
+    } finally {
+      db.close()
+    }
+  })
+
+// ─── Doctor ──────────────────────────────────────────────────────────────────
+
+program
+  .command("doctor")
+  .description("Run diagnostic checks on researcher setup")
+  .action(async () => {
+    const { existsSync } = require("node:fs")
+    const { join } = require("node:path")
+    const home = process.env.HOME ?? "."
+    const checks: { name: string; ok: boolean; detail: string }[] = []
+
+    // Config
+    const configPath = join(home, ".researcher", "config.toml")
+    checks.push({ name: "Config file", ok: existsSync(configPath), detail: configPath })
+
+    // Database
+    const dbPath = join(home, ".researcher", "researcher.db")
+    checks.push({ name: "Database", ok: existsSync(dbPath), detail: dbPath })
+
+    // Providers
+    const config = loadConfig()
+    for (const [name, prov] of Object.entries(config.providers)) {
+      if (prov) {
+        checks.push({ name: `Provider: ${name}`, ok: !!prov.api_key || name === "local", detail: prov.default_model })
+      }
+    }
+    if (!config.providers.anthropic && !config.providers.openai && !config.providers.cerebras) {
+      checks.push({ name: "Any cloud provider", ok: false, detail: "Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or CEREBRAS_API_KEY" })
+    }
+
+    // E2B
+    checks.push({ name: "E2B", ok: !!config.e2b?.api_key, detail: config.e2b?.api_key ? "key set" : "E2B_API_KEY not set (optional)" })
+
+    // Git
+    const gitCheck = Bun.spawnSync(["git", "--version"])
+    checks.push({ name: "Git", ok: gitCheck.exitCode === 0, detail: gitCheck.stdout.toString().trim() })
+
+    // Cycles
+    const { CycleRegistry } = await import("../cycles/registry.ts")
+    const reg = new CycleRegistry()
+    await reg.loadBuiltIn()
+    checks.push({ name: "Cycle definitions", ok: reg.list().length > 0, detail: `${reg.list().length} cycles loaded` })
+
+    // Skills
+    const { createDefaultRegistry } = await import("../skills/index.ts")
+    const skillReg = createDefaultRegistry()
+    checks.push({ name: "Skills", ok: skillReg.list().length > 0, detail: `${skillReg.list().length} skills loaded` })
+
+    // Print results
+    console.log("Researcher Doctor\n")
+    for (const check of checks) {
+      const icon = check.ok ? "\x1b[32m✓\x1b[0m" : "\x1b[31m✗\x1b[0m"
+      console.log(`  ${icon} ${check.name}: ${check.detail}`)
+    }
+    const passed = checks.filter(c => c.ok).length
+    console.log(`\n${passed}/${checks.length} checks passed`)
+  })
+
+// ─── Compare ─────────────────────────────────────────────────────────────────
+
+program
+  .command("compare")
+  .argument("<ws1>", "First workspace ID")
+  .argument("<ws2>", "Second workspace ID")
+  .description("Compare two workspace runs side by side")
+  .action(async (ws1Id, ws2Id) => {
+    const db = initDb(getDbPath())
+    try {
+      const ws1 = getWorkspace(db, ws1Id) as Record<string, unknown> | null
+      const ws2 = getWorkspace(db, ws2Id) as Record<string, unknown> | null
+      if (!ws1) { console.error(`Workspace not found: ${ws1Id}`); process.exit(1) }
+      if (!ws2) { console.error(`Workspace not found: ${ws2Id}`); process.exit(1) }
+
+      if (isJson()) { console.log(JSON.stringify({ ws1, ws2 }, null, 2)); return }
+
+      console.log("Workspace Comparison\n")
+      const fields = ["id", "cycle_id", "status", "current_phase", "cost_total", "created_at"]
+      console.log(`${"Field".padEnd(20)} ${"Workspace 1".padEnd(30)} Workspace 2`)
+      console.log("─".repeat(80))
+      for (const f of fields) {
+        const v1 = f === "cost_total" ? `$${(ws1[f] as number).toFixed(4)}` : String(ws1[f] ?? "-")
+        const v2 = f === "cost_total" ? `$${(ws2[f] as number).toFixed(4)}` : String(ws2[f] ?? "-")
+        const marker = v1 !== v2 ? " *" : ""
+        console.log(`${f.padEnd(20)} ${v1.padEnd(30)} ${v2}${marker}`)
+      }
+    } finally {
+      db.close()
     }
   })
 
