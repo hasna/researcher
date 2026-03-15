@@ -14,6 +14,7 @@ import { CycleRegistry } from "../cycles/registry.ts"
 import { exportKnowledgeMarkdown, queryKnowledge } from "../engine/knowledge.ts"
 import { ResourceManager } from "../engine/resources.ts"
 import { runCycle } from "../engine/cycle-runner.ts"
+import { runAgenticPhase, type AgenticPhaseResult } from "../agent/phases.ts"
 import { ProviderRouter } from "../providers/router.ts"
 
 const program = new Command()
@@ -21,7 +22,7 @@ const program = new Command()
 program
   .name("researcher")
   .description("Universal autonomous experimentation framework")
-  .version("0.0.1")
+  .version("0.0.2")
   .option("--json", "Output as JSON for scripting/piping")
 
 function isJson(): boolean {
@@ -240,6 +241,7 @@ program
   .option("--dry-run", "Preview which providers/models will be used without running")
   .option("--continuous", "Run cycles in a loop until stopped (Ctrl+C)")
   .option("--resume <workspace>", "Resume a failed workspace from the last successful phase")
+  .option("--agentic", "Use agentic loops — each phase loops with tools instead of single LLM call")
   .description("Start a research workspace and run experiments")
   .action(async (projectName, options) => {
     const config = loadConfig()
@@ -361,43 +363,98 @@ program
           continue
         }
 
-        const result = await runCycle({
-          db,
-          router,
-          workspaceId: currentWsId,
-          projectId: project.id as string,
-          cycle,
-          resumeFromPhase: cycleNum === 1 ? resumeFromPhase : undefined,
-          context: {
-            projectName: project.name as string,
-            domain: project.domain as string,
-            metricName: project.metric_name as string,
-            metricDirection: project.metric_direction as string,
-            userGoal: options.goal,
-            previousKnowledge: previousKnowledge || undefined,
-          },
-          onPhaseStart: (phase, i) => {
-            const spinner = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
-            let frame = 0
+        let result: { success: boolean; phases: { phaseName: string; summary: string; cost: number; provider?: string; model?: string }[]; totalCost: number; error?: string }
+
+        if (options.agentic) {
+          // ─── Agentic mode: each phase is a mini-agent with tools and loop ───
+          const agenticPhases: AgenticPhaseResult[] = []
+          let agenticCost = 0
+          let agenticContext = `# Research Context\nProject: ${project.name}\nDomain: ${project.domain}\nMetric: ${project.metric_name} (${project.metric_direction})\n${options.goal ? `Goal: ${options.goal}\n` : ""}${previousKnowledge ? `\nPrevious Knowledge:\n${previousKnowledge}\n` : ""}`
+
+          const { updateWorkspacePhase, updateWorkspaceStatus } = await import("../db/index.ts")
+
+          for (let i = 0; i < cycle.phases.length; i++) {
+            const phase = cycle.phases[i]!
+            updateWorkspacePhase(db, currentWsId, phase.name)
             const start = Date.now()
-            const interval = setInterval(() => {
-              const elapsed = ((Date.now() - start) / 1000).toFixed(0)
-              process.stdout.write(`\r  ${spinner[frame++ % spinner.length]} [${i + 1}/${cycle.phases.length}] ${phase.name} (${phase.provider_hint}) — ${elapsed}s`)
-            }, 100)
-            // Store interval on phase object for cleanup
-            ;(phase as unknown as Record<string, unknown>)._interval = interval
-            ;(phase as unknown as Record<string, unknown>)._start = start
-          },
-          onPhaseComplete: (phase, phaseResult, i) => {
-            const interval = (phase as unknown as Record<string, unknown>)._interval as ReturnType<typeof setInterval> | undefined
-            if (interval) clearInterval(interval)
-            const start = (phase as unknown as Record<string, unknown>)._start as number | undefined
-            const elapsed = start ? ((Date.now() - start) / 1000).toFixed(1) : "?"
-            process.stdout.write(`\r`)
-            console.log(`  \x1b[32m✓\x1b[0m [${i + 1}/${cycle.phases.length}] ${phase.name} — $${phaseResult.cost.toFixed(4)} (${phaseResult.provider}/${phaseResult.model}) ${elapsed}s`)
-            console.log(`    ${phaseResult.summary.slice(0, 200)}...\n`)
-          },
-        })
+            console.log(`  \x1b[36m▸\x1b[0m [${i + 1}/${cycle.phases.length}] ${phase.name} (${phase.type}, agentic)`)
+
+            try {
+              const phaseResult = await runAgenticPhase({
+                db,
+                router,
+                workspaceId: currentWsId,
+                projectId: project.id as string,
+                phase,
+                accumulatedContext: agenticContext,
+                domain: project.domain as string,
+                metricName: project.metric_name as string,
+                metricDirection: project.metric_direction as "lower" | "higher",
+                onAgentIteration: (phaseName, iteration, thought) => {
+                  console.log(`    \x1b[2m[${phaseName} iter ${iteration}] ${thought.slice(0, 150)}\x1b[0m`)
+                },
+              })
+
+              const elapsed = ((Date.now() - start) / 1000).toFixed(1)
+              agenticPhases.push(phaseResult)
+              agenticCost += phaseResult.cost
+              agenticContext += `\n\n## Phase: ${phase.name}\n${phaseResult.summary}`
+
+              console.log(`  \x1b[32m✓\x1b[0m [${i + 1}/${cycle.phases.length}] ${phase.name} — $${phaseResult.cost.toFixed(4)} — ${phaseResult.iterations} iters, ${phaseResult.toolCalls} tool calls${phaseResult.childAgents > 0 ? `, ${phaseResult.childAgents} child agents` : ""} — ${elapsed}s`)
+              console.log(`    ${phaseResult.summary.slice(0, 300)}...\n`)
+            } catch (err) {
+              const elapsed = ((Date.now() - start) / 1000).toFixed(1)
+              console.log(`  \x1b[31m✗\x1b[0m [${i + 1}/${cycle.phases.length}] ${phase.name} — FAILED after ${elapsed}s: ${err instanceof Error ? err.message : String(err)}`)
+              updateWorkspaceStatus(db, currentWsId, "failed")
+              break
+            }
+          }
+
+          updateWorkspaceStatus(db, currentWsId, "completed")
+          result = {
+            success: agenticPhases.every(p => p.success),
+            phases: agenticPhases.map(p => ({ phaseName: p.phaseName, summary: p.summary, cost: p.cost })),
+            totalCost: agenticCost,
+          }
+        } else {
+          // ─── Standard mode: single LLM call per phase ───
+          result = await runCycle({
+            db,
+            router,
+            workspaceId: currentWsId,
+            projectId: project.id as string,
+            cycle,
+            resumeFromPhase: cycleNum === 1 ? resumeFromPhase : undefined,
+            context: {
+              projectName: project.name as string,
+              domain: project.domain as string,
+              metricName: project.metric_name as string,
+              metricDirection: project.metric_direction as string,
+              userGoal: options.goal,
+              previousKnowledge: previousKnowledge || undefined,
+            },
+            onPhaseStart: (phase, i) => {
+              const spinner = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+              let frame = 0
+              const start = Date.now()
+              const interval = setInterval(() => {
+                const elapsed = ((Date.now() - start) / 1000).toFixed(0)
+                process.stdout.write(`\r  ${spinner[frame++ % spinner.length]} [${i + 1}/${cycle.phases.length}] ${phase.name} (${phase.provider_hint}) — ${elapsed}s`)
+              }, 100)
+              ;(phase as unknown as Record<string, unknown>)._interval = interval
+              ;(phase as unknown as Record<string, unknown>)._start = start
+            },
+            onPhaseComplete: (phase, phaseResult, i) => {
+              const interval = (phase as unknown as Record<string, unknown>)._interval as ReturnType<typeof setInterval> | undefined
+              if (interval) clearInterval(interval)
+              const start = (phase as unknown as Record<string, unknown>)._start as number | undefined
+              const elapsed = start ? ((Date.now() - start) / 1000).toFixed(1) : "?"
+              process.stdout.write(`\r`)
+              console.log(`  \x1b[32m✓\x1b[0m [${i + 1}/${cycle.phases.length}] ${phase.name} — $${phaseResult.cost.toFixed(4)} (${phaseResult.provider}/${phaseResult.model}) ${elapsed}s`)
+              console.log(`    ${phaseResult.summary.slice(0, 200)}...\n`)
+            },
+          })
+        }
 
         console.log(`\n${"─".repeat(60)}`)
         console.log(`Cycle ${result.success ? "COMPLETED" : "FAILED"}`)
@@ -407,8 +464,8 @@ program
 
         // Feed knowledge forward for continuous mode
         const lastPhase = result.phases[result.phases.length - 1]
-        if (lastPhase?.data && typeof lastPhase.data === "string") {
-          previousKnowledge = lastPhase.data.slice(0, 2000)
+        if (lastPhase?.summary) {
+          previousKnowledge = lastPhase.summary.slice(0, 2000)
         }
       } while (options.continuous && !stopped)
     } finally {
