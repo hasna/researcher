@@ -16,6 +16,7 @@ import { ResourceManager } from "../engine/resources.ts"
 import { runCycle } from "../engine/cycle-runner.ts"
 import { runAgenticPhase, type AgenticPhaseResult } from "../agent/phases.ts"
 import { ProviderRouter } from "../providers/router.ts"
+import { SandboxRouter } from "../sandbox/router.ts"
 
 const program = new Command()
 
@@ -245,6 +246,7 @@ program
   .description("Start a research workspace and run experiments")
   .action(async (projectName, options) => {
     const config = loadConfig()
+    const parallel = parseInt(options.parallel, 10)
 
     // Resolve project: check registry first, then try local/global DB
     const registered = getRegisteredProject(projectName)
@@ -289,7 +291,7 @@ program
         wsId = createWorkspace(db, {
           project_id: project.id as string,
           cycle_id: cycle.id,
-          config: { parallel: parseInt(options.parallel) },
+          config: { parallel: parallel },
         })
       }
 
@@ -313,6 +315,14 @@ program
       console.log(`Providers: ${router.listProviders().join(", ")}${options.provider ? ` (experiment override: ${options.provider})` : ""}\n`)
       if (options.goal) console.log(`Goal: ${options.goal}\n`)
 
+      // Set up sandbox router for experiment phases
+      const projectPath = registered?.path ?? (project.path as string | null) ?? process.cwd()
+      const projectIsGitRepo = isGitRepo(projectPath)
+      const sandboxRouter = new SandboxRouter({ max_parallel: parallel })
+      const projectConfig = JSON.parse((project.config as string) ?? "{}")
+      const evaluationCommand = projectConfig.evaluation_command as string | undefined
+      const sandboxHints = { isGitRepo: projectIsGitRepo, repoPath: projectPath }
+
       // Dry run — preview only
       if (options.dryRun) {
         console.log("DRY RUN — no LLM calls will be made\n")
@@ -320,7 +330,7 @@ program
           const phase = cycle.phases[i]!
           const resolved = router.resolve(phase.provider_hint)
           const estCost = phase.type === "parallel_experiment"
-            ? `~$${(resolved.estimateCost(2000, 1000) * parseInt(options.parallel)).toFixed(4)}`
+            ? `~$${(resolved.estimateCost(2000, 1000) * parallel).toFixed(4)}`
             : `~$${resolved.estimateCost(2000, 1000).toFixed(4)}`
           console.log(`  [${i + 1}] ${phase.name} (${phase.type})`)
           console.log(`      Provider: ${resolved.name} | Hint: ${phase.provider_hint} | Est. cost: ${estCost}`)
@@ -330,7 +340,7 @@ program
         console.log(`\nTotal estimated cost: ~$${cycle.phases.reduce((sum, p) => {
           const r = router.resolve(p.provider_hint)
           const base = r.estimateCost(2000, 1000)
-          return sum + (p.type === "parallel_experiment" ? base * parseInt(options.parallel) : base)
+          return sum + (p.type === "parallel_experiment" ? base * parallel : base)
         }, 0).toFixed(4)}`)
         return
       }
@@ -347,7 +357,7 @@ program
         cycleNum++
         if (cycleNum > 1) {
           // Create a new workspace for each loop iteration
-          const newWsId = createWorkspace(db, { project_id: project.id as string, cycle_id: cycle.id, config: { parallel: parseInt(options.parallel) } })
+          const newWsId = createWorkspace(db, { project_id: project.id as string, cycle_id: cycle.id, config: { parallel: parallel } })
           console.log(`\n${"═".repeat(60)}\nContinuous cycle #${cycleNum} (workspace: ${newWsId})\n`)
           var currentWsId = newWsId
         } else {
@@ -425,6 +435,9 @@ program
             projectId: project.id as string,
             cycle,
             resumeFromPhase: cycleNum === 1 ? resumeFromPhase : undefined,
+            sandboxRouter,
+            sandboxHints,
+            evaluationCommand,
             context: {
               projectName: project.name as string,
               domain: project.domain as string,
