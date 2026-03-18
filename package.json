@@ -1,6 +1,6 @@
 {
   "name": "@hasna/researcher",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Universal autonomous experimentation framework — PFLK/GREE cycles, pluggable skills, multi-provider LLM routing, SQLite knowledge base, sandbox isolation",
   "type": "module",
   "bin": {
@@ -23,7 +23,7 @@
     "mcp": "bun run src/mcp/index.ts"
   },
   "publishConfig": {
-    "access": "public",
+    "access": "restricted",
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
