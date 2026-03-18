@@ -9,10 +9,21 @@ import { BaseProvider } from "./base.ts"
 // Cost per 1M tokens (USD) — 0 for local
 const PRICING: Record<string, Record<string, { input: number; output: number }>> = {
   openai: {
+    // GPT-4.1 family
     "gpt-4.1": { input: 2, output: 8 },
     "gpt-4.1-mini": { input: 0.4, output: 1.6 },
     "gpt-4.1-nano": { input: 0.1, output: 0.4 },
     "o3-mini": { input: 1.1, output: 4.4 },
+    // GPT-5 family
+    "gpt-5": { input: 10, output: 30 },
+    "gpt-5.1": { input: 8, output: 24 },
+    "gpt-5.1-codex": { input: 6, output: 18 },
+    "gpt-5.2": { input: 10, output: 30 },
+    "gpt-5.2-codex": { input: 8, output: 24 },
+    "gpt-5.3-instant": { input: 3, output: 10 },
+    "gpt-5.4": { input: 15, output: 45 },
+    "gpt-5.4-thinking": { input: 20, output: 60 },
+    "gpt-5.4-pro": { input: 25, output: 75 },
   },
   cerebras: {
     "llama3.1-8b": { input: 0.1, output: 0.1 },

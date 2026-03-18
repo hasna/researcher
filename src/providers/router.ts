@@ -154,18 +154,25 @@ const HINT_PREFERENCES: Record<PhaseDefinition["provider_hint"], ProviderPrefere
   ],
   smart: [
     { name: "anthropic", model: "claude-sonnet-4-6" },
+    { name: "openai", model: "gpt-5" },
     { name: "openai", model: "gpt-4.1" },
     { name: "cerebras" },
     { name: "local" },
   ],
   best: [
+    // Flagship tier
     { name: "anthropic", model: "claude-opus-4-6" },
+    { name: "openai", model: "gpt-5.4-pro" },
+    // Smart tier fallback
+    { name: "openai", model: "gpt-5.4" },
     { name: "anthropic", model: "claude-sonnet-4-6" },
+    { name: "openai", model: "gpt-5" },
     { name: "openai", model: "gpt-4.1" },
   ],
   user_choice: [
     // Resolved dynamically via defaultHint
     { name: "anthropic", model: "claude-sonnet-4-6" },
+    { name: "openai", model: "gpt-5" },
     { name: "openai" },
     { name: "cerebras" },
     { name: "local" },
