@@ -14,9 +14,10 @@ import { CycleRegistry } from "../cycles/registry.ts"
 import { exportKnowledgeMarkdown, queryKnowledge } from "../engine/knowledge.ts"
 import { ResourceManager } from "../engine/resources.ts"
 import { runCycle } from "../engine/cycle-runner.ts"
-import { runAgenticPhase, type AgenticPhaseResult } from "../agent/phases.ts"
+import type { CycleMode } from "../engine/cycle-runner.ts"
 import { ProviderRouter } from "../providers/router.ts"
 import { SandboxRouter } from "../sandbox/router.ts"
+import { registerBrainsCommand } from "./brains.ts"
 
 const program = new Command()
 
@@ -242,7 +243,7 @@ program
   .option("--dry-run", "Preview which providers/models will be used without running")
   .option("--continuous", "Run cycles in a loop until stopped (Ctrl+C)")
   .option("--resume <workspace>", "Resume a failed workspace from the last successful phase")
-  .option("--agentic", "Use agentic loops — each phase loops with tools instead of single LLM call")
+  .option("--simple", "Use simple mode — single LLM call per phase instead of agentic loops")
   .description("Start a research workspace and run experiments")
   .action(async (projectName, options) => {
     const config = loadConfig()
@@ -373,101 +374,52 @@ program
           continue
         }
 
-        let result: { success: boolean; phases: { phaseName: string; summary: string; cost: number; provider?: string; model?: string }[]; totalCost: number; error?: string }
+        const mode = options.simple ? "simple" as const : "agentic" as const
+        console.log(`Mode: ${mode}\n`)
 
-        if (options.agentic) {
-          // ─── Agentic mode: each phase is a mini-agent with tools and loop ───
-          const agenticPhases: AgenticPhaseResult[] = []
-          let agenticCost = 0
-          let agenticContext = `# Research Context\nProject: ${project.name}\nDomain: ${project.domain}\nMetric: ${project.metric_name} (${project.metric_direction})\n${options.goal ? `Goal: ${options.goal}\n` : ""}${previousKnowledge ? `\nPrevious Knowledge:\n${previousKnowledge}\n` : ""}`
-
-          const { updateWorkspacePhase, updateWorkspaceStatus } = await import("../db/index.ts")
-
-          for (let i = 0; i < cycle.phases.length; i++) {
-            const phase = cycle.phases[i]!
-            updateWorkspacePhase(db, currentWsId, phase.name)
+        const result = await runCycle({
+          db,
+          router,
+          workspaceId: currentWsId,
+          projectId: project.id as string,
+          cycle,
+          mode,
+          resumeFromPhase: cycleNum === 1 ? resumeFromPhase : undefined,
+          sandboxRouter,
+          sandboxHints,
+          evaluationCommand,
+          context: {
+            projectName: project.name as string,
+            domain: project.domain as string,
+            metricName: project.metric_name as string,
+            metricDirection: project.metric_direction as string,
+            userGoal: options.goal,
+            previousKnowledge: previousKnowledge || undefined,
+          },
+          onPhaseStart: (phase, i) => {
+            const spinner = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+            let frame = 0
             const start = Date.now()
-            console.log(`  \x1b[36m▸\x1b[0m [${i + 1}/${cycle.phases.length}] ${phase.name} (${phase.type}, agentic)`)
-
-            try {
-              const phaseResult = await runAgenticPhase({
-                db,
-                router,
-                workspaceId: currentWsId,
-                projectId: project.id as string,
-                phase,
-                accumulatedContext: agenticContext,
-                domain: project.domain as string,
-                metricName: project.metric_name as string,
-                metricDirection: project.metric_direction as "lower" | "higher",
-                onAgentIteration: (phaseName, iteration, thought) => {
-                  console.log(`    \x1b[2m[${phaseName} iter ${iteration}] ${thought.slice(0, 150)}\x1b[0m`)
-                },
-              })
-
-              const elapsed = ((Date.now() - start) / 1000).toFixed(1)
-              agenticPhases.push(phaseResult)
-              agenticCost += phaseResult.cost
-              agenticContext += `\n\n## Phase: ${phase.name}\n${phaseResult.summary}`
-
-              console.log(`  \x1b[32m✓\x1b[0m [${i + 1}/${cycle.phases.length}] ${phase.name} — $${phaseResult.cost.toFixed(4)} — ${phaseResult.iterations} iters, ${phaseResult.toolCalls} tool calls${phaseResult.childAgents > 0 ? `, ${phaseResult.childAgents} child agents` : ""} — ${elapsed}s`)
-              console.log(`    ${phaseResult.summary.slice(0, 300)}...\n`)
-            } catch (err) {
-              const elapsed = ((Date.now() - start) / 1000).toFixed(1)
-              console.log(`  \x1b[31m✗\x1b[0m [${i + 1}/${cycle.phases.length}] ${phase.name} — FAILED after ${elapsed}s: ${err instanceof Error ? err.message : String(err)}`)
-              updateWorkspaceStatus(db, currentWsId, "failed")
-              break
-            }
-          }
-
-          updateWorkspaceStatus(db, currentWsId, "completed")
-          result = {
-            success: agenticPhases.every(p => p.success),
-            phases: agenticPhases.map(p => ({ phaseName: p.phaseName, summary: p.summary, cost: p.cost })),
-            totalCost: agenticCost,
-          }
-        } else {
-          // ─── Standard mode: single LLM call per phase ───
-          result = await runCycle({
-            db,
-            router,
-            workspaceId: currentWsId,
-            projectId: project.id as string,
-            cycle,
-            resumeFromPhase: cycleNum === 1 ? resumeFromPhase : undefined,
-            sandboxRouter,
-            sandboxHints,
-            evaluationCommand,
-            context: {
-              projectName: project.name as string,
-              domain: project.domain as string,
-              metricName: project.metric_name as string,
-              metricDirection: project.metric_direction as string,
-              userGoal: options.goal,
-              previousKnowledge: previousKnowledge || undefined,
-            },
-            onPhaseStart: (phase, i) => {
-              const spinner = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
-              let frame = 0
-              const start = Date.now()
-              const interval = setInterval(() => {
-                const elapsed = ((Date.now() - start) / 1000).toFixed(0)
-                process.stdout.write(`\r  ${spinner[frame++ % spinner.length]} [${i + 1}/${cycle.phases.length}] ${phase.name} (${phase.provider_hint}) — ${elapsed}s`)
-              }, 100)
-              ;(phase as unknown as Record<string, unknown>)._interval = interval
-              ;(phase as unknown as Record<string, unknown>)._start = start
-            },
-            onPhaseComplete: (phase, phaseResult, i) => {
-              const interval = (phase as unknown as Record<string, unknown>)._interval as ReturnType<typeof setInterval> | undefined
-              if (interval) clearInterval(interval)
-              const start = (phase as unknown as Record<string, unknown>)._start as number | undefined
-              const elapsed = start ? ((Date.now() - start) / 1000).toFixed(1) : "?"
-              process.stdout.write(`\r`)
-              console.log(`  \x1b[32m✓\x1b[0m [${i + 1}/${cycle.phases.length}] ${phase.name} — $${phaseResult.cost.toFixed(4)} (${phaseResult.provider}/${phaseResult.model}) ${elapsed}s`)
-              console.log(`    ${phaseResult.summary.slice(0, 200)}...\n`)
-            },
-          })
-        }
+            const interval = setInterval(() => {
+              const elapsed = ((Date.now() - start) / 1000).toFixed(0)
+              process.stdout.write(`\r  ${spinner[frame++ % spinner.length]} [${i + 1}/${cycle.phases.length}] ${phase.name} (${phase.provider_hint}, ${mode}) — ${elapsed}s`)
+            }, 100)
+            ;(phase as unknown as Record<string, unknown>)._interval = interval
+            ;(phase as unknown as Record<string, unknown>)._start = start
+          },
+          onPhaseComplete: (phase, phaseResult, i) => {
+            const interval = (phase as unknown as Record<string, unknown>)._interval as ReturnType<typeof setInterval> | undefined
+            if (interval) clearInterval(interval)
+            const start = (phase as unknown as Record<string, unknown>)._start as number | undefined
+            const elapsed = start ? ((Date.now() - start) / 1000).toFixed(1) : "?"
+            process.stdout.write(`\r`)
+            console.log(`  \x1b[32m✓\x1b[0m [${i + 1}/${cycle.phases.length}] ${phase.name} — $${phaseResult.cost.toFixed(4)} (${phaseResult.provider}/${phaseResult.model}) ${elapsed}s`)
+            console.log(`    ${phaseResult.summary.slice(0, 200)}...\n`)
+          },
+          onAgentIteration: (phaseName, iteration, thought) => {
+            console.log(`    \x1b[2m[${phaseName} iter ${iteration}] ${thought.slice(0, 150)}\x1b[0m`)
+          },
+        })
 
         console.log(`\n${"─".repeat(60)}`)
         console.log(`Cycle ${result.success ? "COMPLETED" : "FAILED"}`)
@@ -1294,5 +1246,149 @@ program
         console.log("Meta cycle evolution — coming soon. Requires accumulated experiment data.")
       }),
   )
+
+// ─── Graph ───────────────────────────────────────────────────────────────────
+
+import { createGraph, getGraph, listGraphs, deleteGraph } from "../graph/graph.ts"
+import { getNodesByGraph, getNodesByLabel } from "../graph/nodes.ts"
+import { getEdgesByGraph } from "../graph/edges.ts"
+import { searchGraph } from "../graph/search.ts"
+import { ingestText } from "../graph/ingest.ts"
+
+const graphCmd = program.command("graph").description("Knowledge graph operations")
+
+graphCmd
+  .command("create")
+  .description("Create a knowledge graph")
+  .argument("<name>", "Graph name")
+  .option("-d, --description <desc>", "Description")
+  .option("-p, --project <id>", "Link to project")
+  .action((name: string, opts: Record<string, string>) => {
+    const db = initDb(resolveDbPath())
+    const id = createGraph(db, { name, description: opts.description, project_id: opts.project })
+    output({ id, name }, () => console.log(`Created graph: ${name} (${id})`))
+  })
+
+graphCmd
+  .command("list")
+  .description("List all graphs")
+  .option("-p, --project <id>", "Filter by project")
+  .action((opts: Record<string, string>) => {
+    const db = initDb(resolveDbPath())
+    const graphs = listGraphs(db, opts.project)
+    output(graphs, () => {
+      if (graphs.length === 0) return console.log("No graphs.")
+      for (const g of graphs) {
+        console.log(`${g.id} | ${g.name} | ${g.node_count} nodes, ${g.edge_count} edges, ${g.episode_count} episodes`)
+      }
+    })
+  })
+
+graphCmd
+  .command("info")
+  .description("Show graph details")
+  .argument("<id>", "Graph ID")
+  .action((id: string) => {
+    const db = initDb(resolveDbPath())
+    const g = getGraph(db, id)
+    if (!g) return console.log(`Graph not found: ${id}`)
+    output(g, () => {
+      console.log(`Graph: ${g.name} (${g.id})`)
+      console.log(`Description: ${g.description || "(none)"}`)
+      console.log(`Nodes: ${g.node_count} | Edges: ${g.edge_count} | Episodes: ${g.episode_count}`)
+      console.log(`Created: ${g.created_at}`)
+    })
+  })
+
+graphCmd
+  .command("delete")
+  .description("Delete a graph")
+  .argument("<id>", "Graph ID")
+  .action((id: string) => {
+    const db = initDb(resolveDbPath())
+    const deleted = deleteGraph(db, id)
+    console.log(deleted ? `Deleted graph ${id}` : `Graph not found: ${id}`)
+  })
+
+graphCmd
+  .command("ingest")
+  .description("Ingest a text file into a graph")
+  .argument("<graph_id>", "Target graph ID")
+  .argument("<file>", "File to ingest (txt, md, pdf)")
+  .option("-m, --model <model>", "LLM model for extraction")
+  .option("--no-embeddings", "Skip embedding generation")
+  .action(async (graphId: string, file: string, opts: Record<string, unknown>) => {
+    const db = initDb(resolveDbPath())
+    const fs = require("fs")
+    const text = fs.readFileSync(file, "utf-8")
+    console.log(`Ingesting ${file} (${text.length} chars)...`)
+    const result = await ingestText(db, graphId, text, {
+      model: opts.model as string | undefined,
+      skip_embeddings: opts.embeddings === false,
+    })
+    output(result, () => {
+      console.log(`Done → ${result.nodes_created} new nodes (+${result.nodes_updated} updated), ${result.edges_created} new edges`)
+    })
+  })
+
+graphCmd
+  .command("search")
+  .description("Search a knowledge graph")
+  .argument("<graph_id>", "Graph ID")
+  .argument("<query>", "Search query")
+  .option("-l, --limit <n>", "Max results", "20")
+  .option("-s, --scope <scope>", "Search scope: nodes, edges, both", "both")
+  .action(async (graphId: string, query: string, opts: Record<string, string>) => {
+    const db = initDb(resolveDbPath())
+    const result = await searchGraph(db, graphId, query, {
+      limit: parseInt(opts.limit),
+      scope: opts.scope as "nodes" | "edges" | "both",
+    })
+    output(result, () => {
+      if (result.nodes.length > 0) {
+        console.log(`\nNodes (${result.nodes.length}):`)
+        for (const n of result.nodes) console.log(`  ${n.name} [${n.labels.join(", ")}] — ${n.summary.slice(0, 100)}`)
+      }
+      if (result.facts.length > 0) {
+        console.log(`\nFacts (${result.facts.length}):`)
+        for (const f of result.facts) console.log(`  • ${f.slice(0, 150)}`)
+      }
+    })
+  })
+
+graphCmd
+  .command("nodes")
+  .description("List nodes in a graph")
+  .argument("<graph_id>", "Graph ID")
+  .option("-l, --label <label>", "Filter by label")
+  .option("--limit <n>", "Max results", "50")
+  .action((graphId: string, opts: Record<string, string>) => {
+    const db = initDb(resolveDbPath())
+    const nodes = opts.label
+      ? getNodesByLabel(db, graphId, opts.label)
+      : getNodesByGraph(db, graphId, { limit: parseInt(opts.limit) }).items
+    output(nodes, () => {
+      console.log(`${nodes.length} nodes:`)
+      for (const n of nodes) console.log(`  ${n.id} | ${n.name} [${n.labels.join(", ")}] — ${n.summary.slice(0, 80)}`)
+    })
+  })
+
+graphCmd
+  .command("edges")
+  .description("List edges in a graph")
+  .argument("<graph_id>", "Graph ID")
+  .option("--limit <n>", "Max results", "50")
+  .action((graphId: string, opts: Record<string, string>) => {
+    const db = initDb(resolveDbPath())
+    const result = getEdgesByGraph(db, graphId, { limit: parseInt(opts.limit) })
+    output(result.items, () => {
+      console.log(`${result.items.length} edges:`)
+      for (const e of result.items) console.log(`  ${e.id} | ${e.name}: ${e.fact.slice(0, 100)}`)
+    })
+  })
+
+// ─── Brains ──────────────────────────────────────────────────────────────────
+
+registerBrainsCommand(program)
 
 program.parse()

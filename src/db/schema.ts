@@ -3,7 +3,7 @@
  * Uses bun:sqlite native API.
  */
 
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 4
 
 export const SCHEMA_SQL = `
 -- ─── Projects ────────────────────────────────────────────────────────────────
@@ -95,6 +95,23 @@ CREATE TABLE IF NOT EXISTS knowledge (
 CREATE INDEX IF NOT EXISTS idx_knowledge_project ON knowledge(project_id);
 CREATE INDEX IF NOT EXISTS idx_knowledge_domain ON knowledge(domain);
 
+-- ─── Knowledge Edges (Graph) ────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS knowledge_edges (
+  id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES knowledge(id) ON DELETE CASCADE,
+  target_id TEXT NOT NULL REFERENCES knowledge(id) ON DELETE CASCADE,
+  relationship TEXT NOT NULL CHECK(relationship IN ('contradicts','depends_on','supersedes','supports','derives_from','related_to')),
+  weight REAL DEFAULT 1.0,
+  metadata TEXT DEFAULT '{}',
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(source_id, target_id, relationship)
+);
+
+CREATE INDEX IF NOT EXISTS idx_edges_source ON knowledge_edges(source_id);
+CREATE INDEX IF NOT EXISTS idx_edges_target ON knowledge_edges(target_id);
+CREATE INDEX IF NOT EXISTS idx_edges_relationship ON knowledge_edges(relationship);
+
 -- ─── Cycles ──────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS cycles (
@@ -176,6 +193,143 @@ CREATE TABLE IF NOT EXISTS model_calls (
 
 CREATE INDEX IF NOT EXISTS idx_model_calls_workspace ON model_calls(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_model_calls_provider ON model_calls(provider);
+
+-- ─── Pipeline Runs ──────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  pipeline_id TEXT NOT NULL,
+  status TEXT DEFAULT 'running' CHECK(status IN ('running','completed','failed','stopped')),
+  current_step TEXT,
+  steps_completed INTEGER DEFAULT 0,
+  cost_total REAL DEFAULT 0,
+  config TEXT DEFAULT '{}',
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_project ON pipeline_runs(project_id);
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status);
+
+-- ─── Graphs ─────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS graphs (
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
+  project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  ontology TEXT NOT NULL DEFAULT '{}',
+  node_count INTEGER NOT NULL DEFAULT 0,
+  edge_count INTEGER NOT NULL DEFAULT 0,
+  episode_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_graphs_project ON graphs(project_id);
+
+-- ─── Graph Nodes ────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS graph_nodes (
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
+  graph_id TEXT NOT NULL REFERENCES graphs(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  labels TEXT NOT NULL DEFAULT '[]',
+  summary TEXT NOT NULL DEFAULT '',
+  attributes TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(graph_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_graph_nodes_graph ON graph_nodes(graph_id);
+CREATE INDEX IF NOT EXISTS idx_graph_nodes_name ON graph_nodes(name);
+
+-- ─── Graph Edges ────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS graph_edges (
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
+  graph_id TEXT NOT NULL REFERENCES graphs(id) ON DELETE CASCADE,
+  name TEXT NOT NULL DEFAULT '',
+  fact TEXT NOT NULL DEFAULT '',
+  source_node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+  target_node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+  attributes TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  valid_at TEXT,
+  invalid_at TEXT,
+  expired_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_graph_edges_graph ON graph_edges(graph_id);
+CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(source_node_id);
+CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target_node_id);
+
+-- ─── Graph Episodes ─────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS graph_episodes (
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(8)))),
+  graph_id TEXT NOT NULL REFERENCES graphs(id) ON DELETE CASCADE,
+  data TEXT NOT NULL,
+  type TEXT NOT NULL DEFAULT 'text',
+  processed INTEGER NOT NULL DEFAULT 0,
+  node_count INTEGER NOT NULL DEFAULT 0,
+  edge_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_graph_episodes_graph ON graph_episodes(graph_id);
+CREATE INDEX IF NOT EXISTS idx_graph_episodes_processed ON graph_episodes(processed);
+
+-- ─── Graph FTS (Full-Text Search) ───────────────────────────────────────────
+
+CREATE VIRTUAL TABLE IF NOT EXISTS graph_nodes_fts USING fts5(
+  name, summary, labels,
+  content='graph_nodes',
+  content_rowid='rowid'
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS graph_edges_fts USING fts5(
+  name, fact,
+  content='graph_edges',
+  content_rowid='rowid'
+);
+
+-- FTS triggers to keep indexes in sync
+CREATE TRIGGER IF NOT EXISTS graph_nodes_ai AFTER INSERT ON graph_nodes BEGIN
+  INSERT INTO graph_nodes_fts(rowid, name, summary, labels)
+  VALUES (new.rowid, new.name, new.summary, new.labels);
+END;
+
+CREATE TRIGGER IF NOT EXISTS graph_nodes_ad AFTER DELETE ON graph_nodes BEGIN
+  INSERT INTO graph_nodes_fts(graph_nodes_fts, rowid, name, summary, labels)
+  VALUES ('delete', old.rowid, old.name, old.summary, old.labels);
+END;
+
+CREATE TRIGGER IF NOT EXISTS graph_nodes_au AFTER UPDATE ON graph_nodes BEGIN
+  INSERT INTO graph_nodes_fts(graph_nodes_fts, rowid, name, summary, labels)
+  VALUES ('delete', old.rowid, old.name, old.summary, old.labels);
+  INSERT INTO graph_nodes_fts(rowid, name, summary, labels)
+  VALUES (new.rowid, new.name, new.summary, new.labels);
+END;
+
+CREATE TRIGGER IF NOT EXISTS graph_edges_ai AFTER INSERT ON graph_edges BEGIN
+  INSERT INTO graph_edges_fts(rowid, name, fact)
+  VALUES (new.rowid, new.name, new.fact);
+END;
+
+CREATE TRIGGER IF NOT EXISTS graph_edges_ad AFTER DELETE ON graph_edges BEGIN
+  INSERT INTO graph_edges_fts(graph_edges_fts, rowid, name, fact)
+  VALUES ('delete', old.rowid, old.name, old.fact);
+END;
+
+CREATE TRIGGER IF NOT EXISTS graph_edges_au AFTER UPDATE ON graph_edges BEGIN
+  INSERT INTO graph_edges_fts(graph_edges_fts, rowid, name, fact)
+  VALUES ('delete', old.rowid, old.name, old.fact);
+  INSERT INTO graph_edges_fts(rowid, name, fact)
+  VALUES (new.rowid, new.name, new.fact);
+END;
 
 -- ─── Schema version tracking ─────────────────────────────────────────────────
 
