@@ -1,0 +1,30 @@
+name: Iterative Refinement
+description: >
+  PFLK with confidence threshold loop.
+  Run PFLK repeatedly until average knowledge confidence exceeds 0.8.
+  Each iteration builds on the previous knowledge, refining hypotheses
+  and narrowing the search space.
+author: human
+steps:
+  - id: iteration-1
+    cycleId: pflk
+    overrides:
+      maxParallel: 10
+
+  - id: iteration-2
+    cycleId: pflk
+    condition:
+      type: confidence_threshold
+      threshold: 0.8
+      onFail: skip
+    overrides:
+      maxParallel: 5
+
+  - id: iteration-3
+    cycleId: pflk
+    condition:
+      type: confidence_threshold
+      threshold: 0.8
+      onFail: skip
+    overrides:
+      maxParallel: 3

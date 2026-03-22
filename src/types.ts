@@ -240,6 +240,64 @@ export interface ModelCall {
   created_at: string
 }
 
+// ─── Pipelines (Multi-Cycle Orchestration) ──────────────────────────────────
+
+export interface CyclePipeline {
+  id: string
+  name: string
+  description: string
+  author: string
+  /** Ordered steps in the pipeline */
+  steps: PipelineStep[]
+  meta?: Record<string, unknown>
+}
+
+export interface PipelineStep {
+  /** Step ID for referencing in conditions */
+  id: string
+  /** Cycle ID to execute */
+  cycleId: string
+  /** Optional conditions to check before executing this step */
+  condition?: PipelineCondition
+  /** Override cycle config for this step */
+  overrides?: {
+    maxParallel?: number
+    providerHint?: string
+    evaluationCommand?: string
+  }
+}
+
+export interface PipelineCondition {
+  /** Type of condition */
+  type: "confidence_threshold" | "knowledge_gap" | "experiment_success_rate" | "always" | "custom"
+  /** For confidence_threshold: minimum avg confidence from previous step */
+  threshold?: number
+  /** For custom: expression to evaluate */
+  expression?: string
+  /** What to do if condition is NOT met */
+  onFail: "skip" | "branch" | "stop"
+  /** Step ID to branch to if condition fails (for onFail: "branch") */
+  branchTo?: string
+}
+
+export interface PipelineResult {
+  success: boolean
+  stepsCompleted: number
+  totalSteps: number
+  totalCost: number
+  stepResults: PipelineStepResult[]
+  error?: string
+}
+
+export interface PipelineStepResult {
+  stepId: string
+  cycleId: string
+  success: boolean
+  cost: number
+  skipped: boolean
+  cycleResult?: import("./engine/cycle-runner.ts").CycleResult
+}
+
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 export interface ResearcherConfig {

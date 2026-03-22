@@ -1,0 +1,29 @@
+name: Deep Research
+description: >
+  GREE then PFLK then synthesize.
+  First gather broadly with escalating models (GREE), then stress-test
+  with parallel experiments (PFLK). Produces high-confidence knowledge
+  by combining breadth-first exploration with depth-first exploitation.
+author: human
+steps:
+  - id: gather-broadly
+    cycleId: gree
+    overrides:
+      providerHint: cheap
+
+  - id: stress-test
+    cycleId: pflk
+    condition:
+      type: confidence_threshold
+      threshold: 0.3
+      onFail: skip
+    overrides:
+      maxParallel: 10
+
+  - id: final-synthesis
+    cycleId: gree
+    condition:
+      type: always
+      onFail: skip
+    overrides:
+      providerHint: best

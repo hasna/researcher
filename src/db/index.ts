@@ -489,6 +489,72 @@ export function listSkills(db: Database) {
   return db.query("SELECT * FROM skills ORDER BY total_uses DESC").all()
 }
 
+// ─── Pipeline runs ──────────────────────────────────────────────────────
+
+export function createPipelineRun(
+  db: Database,
+  data: {
+    id: string
+    project_id: string
+    pipeline_id: string
+    config?: Record<string, unknown>
+  },
+): string {
+  db.run(
+    `INSERT INTO pipeline_runs (id, project_id, pipeline_id, config)
+     VALUES (?, ?, ?, ?)`,
+    [data.id, data.project_id, data.pipeline_id, JSON.stringify(data.config ?? {})],
+  )
+  return data.id
+}
+
+export function updatePipelineRun(
+  db: Database,
+  id: string,
+  updates: {
+    status?: string
+    current_step?: string
+    steps_completed?: number
+    cost_total?: number
+  },
+): void {
+  const sets: string[] = ["updated_at = datetime('now')"]
+  const params: (string | number | null)[] = []
+
+  if (updates.status !== undefined) {
+    sets.push("status = ?")
+    params.push(updates.status)
+  }
+  if (updates.current_step !== undefined) {
+    sets.push("current_step = ?")
+    params.push(updates.current_step)
+  }
+  if (updates.steps_completed !== undefined) {
+    sets.push("steps_completed = ?")
+    params.push(updates.steps_completed)
+  }
+  if (updates.cost_total !== undefined) {
+    sets.push("cost_total = ?")
+    params.push(updates.cost_total)
+  }
+
+  params.push(id)
+  db.run(`UPDATE pipeline_runs SET ${sets.join(", ")} WHERE id = ?`, params)
+}
+
+export function getPipelineRun(db: Database, id: string) {
+  return db.query("SELECT * FROM pipeline_runs WHERE id = ?").get(id)
+}
+
+export function listPipelineRuns(db: Database, projectId?: string) {
+  if (projectId) {
+    return db
+      .query("SELECT * FROM pipeline_runs WHERE project_id = ? ORDER BY created_at DESC")
+      .all(projectId)
+  }
+  return db.query("SELECT * FROM pipeline_runs ORDER BY created_at DESC").all()
+}
+
 // ─── Stats ───────────────────────────────────────────────────────────────────
 
 export function getCostSummary(db: Database, workspaceId?: string) {

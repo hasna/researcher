@@ -1,0 +1,19 @@
+name: Hypothesis Test
+description: >
+  PFLK then GREE.
+  First formulate hypotheses and run parallel experiments to find
+  promising approaches (PFLK), then test the winners with escalating
+  model intelligence (GREE) to refine and validate.
+author: human
+steps:
+  - id: formulate
+    cycleId: pflk
+    overrides:
+      maxParallel: 5
+
+  - id: validate
+    cycleId: gree
+    condition:
+      type: experiment_success_rate
+      threshold: 0.2
+      onFail: stop
