@@ -9,7 +9,9 @@ test("default registry has all built-in skills", () => {
   expect(registry.has("web-search")).toBe(true)
   expect(registry.has("db-query")).toBe(true)
   expect(registry.has("git-ops")).toBe(true)
-  expect(registry.list()).toHaveLength(6)
+  expect(registry.has("pdf-parse")).toBe(true)
+  expect(registry.has("paper-search")).toBe(true)
+  expect(registry.list()).toHaveLength(8)
 })
 
 test("forPhase returns relevant skills", () => {

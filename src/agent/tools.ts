@@ -6,6 +6,8 @@
 import type { Database } from "bun:sqlite"
 import type { AgentTool } from "./loop.ts"
 import type { SandboxInstance } from "../sandbox/base.ts"
+import { searchWeb } from "../providers/web-search.ts"
+import { searchDirectArxiv } from "../skills/core/paper-search.ts"
 
 // ─── Thinking tools ──────────────────────────────────────────────────────────
 
@@ -20,18 +22,65 @@ export function noteToSelf(): AgentTool {
   }
 }
 
+// ─── Paper search tools ─────────────────────────────────────────────────────
+
+export function searchPapers(): AgentTool {
+  return {
+    name: "search_papers",
+    description: "Search academic research papers on arXiv. Returns papers with titles, authors, abstracts, and PDF links. Uses @hasna/connectors arxiv connector when available, falls back to direct arXiv API.",
+    parameters: {
+      query: { type: "string", description: "Search query (keywords, topics)", required: true },
+      category: { type: "string", description: "arXiv category filter (e.g., 'cs.AI', 'cs.LG', 'math.OC')" },
+      author: { type: "string", description: "Author name to search for" },
+      max_results: { type: "number", description: "Max papers to return (default 5)" },
+    },
+    execute: async (params) => {
+      try {
+        const papers = await searchDirectArxiv(params.query as string, {
+          category: params.category as string | undefined,
+          author: params.author as string | undefined,
+          maxResults: (params.max_results as number) ?? 5,
+        })
+
+        if (papers.length === 0) {
+          return `No papers found for "${params.query}".`
+        }
+
+        return `Found ${papers.length} papers:\n\n${papers.map((p, i) => `${i + 1}. ${p.title}\n   Authors: ${p.authors.slice(0, 3).join(", ")}${p.authors.length > 3 ? " et al." : ""}\n   ${p.arxivUrl}\n   ${p.abstract.slice(0, 300)}...`).join("\n\n")}`
+      } catch (err) {
+        return `Paper search failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    },
+  }
+}
+
 // ─── Search & gather tools ───────────────────────────────────────────────────
 
 export function webSearch(): AgentTool {
   return {
     name: "web_search",
-    description: "Search the web for information. Returns search results with titles and snippets.",
+    description: "Search the web for information. Uses Exa, OpenAI, or Anthropic web search with automatic fallback. Returns results with titles, URLs, and snippets.",
     parameters: {
       query: { type: "string", description: "Search query", required: true },
+      max_results: { type: "number", description: "Max results (default 5)" },
+      domains: { type: "string", description: "Comma-separated domains to filter (e.g., 'arxiv.org,github.com')" },
     },
     execute: async (params) => {
-      // In production, this would call Exa, Serper, or similar
-      return `[Web search for "${params.query}" — requires search API integration. Use your training knowledge for now.]`
+      try {
+        const domains = (params.domains as string)?.split(",").map(d => d.trim()).filter(Boolean)
+        const response = await searchWeb(params.query as string, {
+          maxResults: (params.max_results as number) ?? 5,
+          includeDomains: domains?.length ? domains : undefined,
+        })
+
+        if (response.results.length === 0) {
+          return `No web search results found for "${params.query}". No search API keys configured (set EXA_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY).`
+        }
+
+        return `Web search results (${response.provider}, ${response.results.length} results):\n${response.results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet.slice(0, 300)}`).join("\n\n")}`
+      } catch (err) {
+        return `Web search failed: ${err instanceof Error ? err.message : String(err)}. Use your training knowledge instead.`
+      }
     },
   }
 }
@@ -216,7 +265,7 @@ export function problemTools(db: Database): AgentTool[] {
 
 /** Tools for the FEEDBACK/GATHER phase — collecting information */
 export function gatherTools(db: Database): AgentTool[] {
-  return [noteToSelf(), webSearch(), queryKnowledgeBase(db), queryPastExperiments(db)]
+  return [noteToSelf(), webSearch(), searchPapers(), queryKnowledgeBase(db), queryPastExperiments(db)]
 }
 
 /** Tools for the LOOPHOLE/EXPERIMENT phase — running experiments */
