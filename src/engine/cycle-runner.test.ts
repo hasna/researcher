@@ -66,6 +66,7 @@ test("run a simple 2-phase cycle", async () => {
     workspaceId: wsId,
     projectId: projId,
     cycle: simpleCycle,
+    mode: "simple",
     context: {
       projectName: "test-proj",
       domain: "code",
@@ -103,6 +104,7 @@ test("cycle updates workspace phase during execution", async () => {
     workspaceId: wsId,
     projectId: projId,
     cycle: simpleCycle,
+    mode: "simple",
     context: {
       projectName: "phase-track",
       domain: "code",
@@ -132,6 +134,7 @@ test("cycle handles phase failure gracefully", async () => {
     workspaceId: wsId,
     projectId: projId,
     cycle: simpleCycle,
+    mode: "simple",
     context: {
       projectName: "fail-test",
       domain: "code",
@@ -176,6 +179,7 @@ test("cycle runs all 5 phase types", async () => {
     workspaceId: wsId,
     projectId: projId,
     cycle: fullCycle,
+    mode: "simple",
     context: { projectName: "all", domain: "code", metricName: "score", metricDirection: "higher" },
   })
 

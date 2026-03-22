@@ -3,6 +3,10 @@
  *
  * The core orchestrator: reads a CycleDefinition, iterates through phases,
  * delegates to the phase runner, tracks progress in the database.
+ *
+ * Default mode is "agentic" — each phase runs as a mini-agent with tools
+ * and a loop (think → act → observe → decide). Use mode: "simple" to fall
+ * back to single LLM call per phase.
  */
 
 import type { Database } from "bun:sqlite"
@@ -11,6 +15,10 @@ import type { ProviderRouter } from "../providers/router.ts"
 import type { SandboxRouter, ResolveHints } from "../sandbox/router.ts"
 import { updateWorkspacePhase, updateWorkspaceStatus, addWorkspaceCost } from "../db/index.ts"
 import { runPhase, type PhaseContext, type PhaseResult } from "./phase-runner.ts"
+import { runAgenticPhase, type AgenticPhaseContext, type AgenticPhaseResult } from "../agent/phases.ts"
+import { type ResearchEventEmitter, getGlobalEmitter } from "./events.ts"
+
+export type CycleMode = "agentic" | "simple"
 
 export interface CycleRunnerConfig {
   db: Database
@@ -26,6 +34,11 @@ export interface CycleRunnerConfig {
     previousKnowledge?: string
     userGoal?: string
   }
+  /**
+   * Execution mode: "agentic" (default) uses tool-calling agent loops per phase.
+   * "simple" uses single LLM call per phase (faster, cheaper, less capable).
+   */
+  mode?: CycleMode
   /** Optional sandbox router for running real experiments */
   sandboxRouter?: SandboxRouter
   /** Hints for sandbox creation (isGitRepo, repoPath, etc.) */
@@ -37,6 +50,10 @@ export interface CycleRunnerConfig {
   onPhaseStart?: (phase: PhaseDefinition, index: number) => void
   onPhaseComplete?: (phase: PhaseDefinition, result: PhaseResult, index: number) => void
   onError?: (phase: PhaseDefinition, error: Error, index: number) => void
+  /** Called after each agentic iteration (agentic mode only) */
+  onAgentIteration?: (phase: string, iteration: number, thought: string) => void
+  /** Event emitter for real-time progress. Uses global emitter if not provided. */
+  emitter?: ResearchEventEmitter
 }
 
 export interface CycleResult {
@@ -48,12 +65,20 @@ export interface CycleResult {
 
 /**
  * Execute a full cycle — runs each phase sequentially, passing outputs forward.
+ *
+ * Default mode is "agentic": each phase runs as a mini-agent with tools and
+ * iterative loops. Use mode: "simple" for single LLM calls (faster/cheaper).
  */
 export async function runCycle(config: CycleRunnerConfig): Promise<CycleResult> {
   const { db, router, workspaceId, cycle, context } = config
+  const mode = config.mode ?? "agentic"
+  const emitter = config.emitter ?? getGlobalEmitter()
+  const ev = emitter.forWorkspace(workspaceId)
   const phaseResults: PhaseResult[] = []
   let totalCost = 0
   let accumulatedContext = buildInitialContext(context)
+
+  ev.cycleStart(cycle.id, cycle.name, cycle.phases.length, mode)
 
   const startPhase = config.resumeFromPhase ?? 0
   if (startPhase > 0) {
@@ -77,26 +102,50 @@ export async function runCycle(config: CycleRunnerConfig): Promise<CycleResult> 
     // Update workspace state
     updateWorkspacePhase(db, workspaceId, phase.name)
     config.onPhaseStart?.(phase, i)
+    ev.phaseStart(phase.name, phase.type, i, cycle.phases.length, phase.provider_hint)
+    const phaseStartTime = Date.now()
 
     try {
-      const phaseContext: PhaseContext = {
-        db,
-        router,
-        workspaceId,
-        projectId: config.projectId,
-        phase,
-        accumulatedContext,
-        previousResults: phaseResults,
-        // Sandbox context for experiment phases
-        sandboxRouter: config.sandboxRouter,
-        sandboxHints: config.sandboxHints,
-        evaluationCommand: config.evaluationCommand,
-        metricName: context.metricName,
-        metricDirection: context.metricDirection as "lower" | "higher",
-        projectDomain: context.domain,
+      let result: PhaseResult
+
+      if (mode === "agentic") {
+        // Agentic mode: each phase is a mini-agent with tools and loop
+        const agenticCtx: AgenticPhaseContext = {
+          db,
+          router,
+          workspaceId,
+          projectId: config.projectId,
+          phase,
+          accumulatedContext,
+          domain: context.domain,
+          metricName: context.metricName,
+          metricDirection: context.metricDirection as "lower" | "higher",
+          sandboxRouter: config.sandboxRouter,
+          evaluationCommand: config.evaluationCommand,
+          onAgentIteration: config.onAgentIteration,
+        }
+        const agenticResult = await runAgenticPhase(agenticCtx)
+        result = mapAgenticResult(agenticResult)
+      } else {
+        // Simple mode: single LLM call per phase
+        const phaseContext: PhaseContext = {
+          db,
+          router,
+          workspaceId,
+          projectId: config.projectId,
+          phase,
+          accumulatedContext,
+          previousResults: phaseResults,
+          sandboxRouter: config.sandboxRouter,
+          sandboxHints: config.sandboxHints,
+          evaluationCommand: config.evaluationCommand,
+          metricName: context.metricName,
+          metricDirection: context.metricDirection as "lower" | "higher",
+          projectDomain: context.domain,
+        }
+        result = await runPhase(phaseContext)
       }
 
-      const result = await runPhase(phaseContext)
       phaseResults.push(result)
       totalCost += result.cost
 
@@ -111,9 +160,12 @@ export async function runCycle(config: CycleRunnerConfig): Promise<CycleResult> 
         accumulatedContext += `\nData: ${typeof result.data === "string" ? result.data : JSON.stringify(result.data)}`
       }
 
+      ev.phaseComplete(phase.name, phase.type, result.success, result.cost, Date.now() - phaseStartTime, result.summary.slice(0, 500))
+      ev.costUpdate(result.cost, totalCost, result.provider, result.model, 0, 0)
       config.onPhaseComplete?.(phase, result, i)
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err))
+      ev.phaseError(phase.name, error.message)
       config.onError?.(phase, error, i)
 
       phaseResults.push({
@@ -127,6 +179,7 @@ export async function runCycle(config: CycleRunnerConfig): Promise<CycleResult> 
       })
 
       updateWorkspaceStatus(db, workspaceId, "failed")
+      ev.cycleError(cycle.id, phase.name, error.message)
       return {
         success: false,
         phases: phaseResults,
@@ -137,10 +190,26 @@ export async function runCycle(config: CycleRunnerConfig): Promise<CycleResult> 
   }
 
   updateWorkspaceStatus(db, workspaceId, "completed")
+  ev.cycleComplete(cycle.id, true, totalCost, phaseResults.length)
   return {
     success: true,
     phases: phaseResults,
     totalCost,
+  }
+}
+
+/**
+ * Map an AgenticPhaseResult to the standard PhaseResult format.
+ */
+function mapAgenticResult(r: AgenticPhaseResult): PhaseResult {
+  return {
+    phaseName: r.phaseName,
+    success: r.success,
+    summary: r.summary,
+    data: r.data,
+    cost: r.cost,
+    provider: "agentic",
+    model: `${r.iterations}i/${r.toolCalls}t/${r.childAgents}c`,
   }
 }
 
