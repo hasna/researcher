@@ -16,6 +16,7 @@ import {
   createCerebrasProvider,
   createLocalProvider,
 } from "./openai-compat.ts"
+import { searchWeb, type WebSearchOptions, type WebSearchResponse } from "./web-search.ts"
 
 export interface RouterConfig {
   cerebras?: { apiKey?: string }
@@ -129,6 +130,13 @@ export class ProviderRouter {
    */
   hasProvider(name: string): boolean {
     return this.providers.has(name)
+  }
+
+  /**
+   * Search the web using best available provider (Exa → OpenAI → Anthropic → empty).
+   */
+  async searchWeb(query: string, opts?: WebSearchOptions): Promise<WebSearchResponse> {
+    return searchWeb(query, opts)
   }
 }
 
