@@ -16,6 +16,7 @@ import type { SandboxRouter, ResolveHints } from "../sandbox/router.ts"
 import type { SkillRegistry } from "../skills/registry.ts"
 import { logModelCall } from "../db/index.ts"
 import { saveKnowledge } from "./knowledge.ts"
+import { autoLinkKnowledge } from "./knowledge-graph.ts"
 import { runParallelExperiments, type ExperimentHypothesis } from "./parallel.ts"
 
 export interface PhaseContext {
@@ -350,13 +351,20 @@ Synthesize the results into:
     const confidenceMatch = result.content.match(/CONFIDENCE[:\s]*\**\s*(0?\.\d+|\d\.\d+)/i)
     const confidence = confidenceMatch ? parseFloat(confidenceMatch[1]!) : 0.5
 
-    saveKnowledge(ctx.db, {
+    const knowledgeId = saveKnowledge(ctx.db, {
       project_id: ctx.projectId,
       domain: ctx.projectDomain ?? "general",
       insight,
       confidence: Math.min(1, Math.max(0, confidence)),
       tags: ["auto-generated", ctx.phase.name],
     })
+
+    // Auto-link new knowledge to existing knowledge graph
+    try {
+      await autoLinkKnowledge(ctx.db, ctx.router, knowledgeId, ctx.projectId)
+    } catch {
+      // Non-critical — don't fail if auto-linking fails
+    }
   } catch {
     // Non-critical — don't fail the phase if knowledge save fails
   }
