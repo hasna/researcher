@@ -34,6 +34,8 @@ export interface SandboxCreateOpts {
   hypothesis: string
   /** For git worktree: the repo path */
   repoPath?: string
+  /** Project path — tempdir sandbox will copy key files from here */
+  projectPath?: string
   /** Files to copy into a tempdir sandbox */
   files?: { path: string; content: string }[]
   /** For e2b: template to use */

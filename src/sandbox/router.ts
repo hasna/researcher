@@ -82,7 +82,7 @@ export class SandboxRouter {
         sandbox = await WorktreeSandbox.create({ ...opts, repoPath: hints.repoPath })
         break
       case "tempdir":
-        sandbox = await TempDirSandbox.create(opts)
+        sandbox = await TempDirSandbox.create({ ...opts, projectPath: opts.projectPath ?? hints.repoPath })
         break
       case "e2b":
         sandbox = await E2BSandbox.create(opts)

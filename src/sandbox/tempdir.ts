@@ -3,7 +3,8 @@
  * Creates a temporary directory for experiments. Free, instant, no git needed.
  */
 
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rm, cp } from "node:fs/promises"
+import { existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { SandboxInstance, ExecResult, SandboxCreateOpts } from "./base.ts"
@@ -24,7 +25,23 @@ export class TempDirSandbox implements SandboxInstance {
 
     const sandbox = new TempDirSandbox(id, path)
 
-    // Copy initial files if provided
+    // Copy project files into sandbox if projectPath is provided
+    if (opts.projectPath && existsSync(opts.projectPath)) {
+      try {
+        await cp(opts.projectPath, path, {
+          recursive: true,
+          filter: (src) => {
+            // Skip node_modules, .git, dist, and other heavy dirs
+            const skip = ["/node_modules", "/.git", "/dist", "/.next", "/build", "/__pycache__"]
+            return !skip.some((s) => src.includes(s))
+          },
+        })
+      } catch {
+        // Best effort — continue even if copy fails
+      }
+    }
+
+    // Copy/overwrite with explicit files if provided
     if (opts.files) {
       for (const file of opts.files) {
         await sandbox.writeFile(file.path, file.content)
