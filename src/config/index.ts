@@ -1,16 +1,27 @@
 /**
- * Configuration system — ~/.researcher/ management.
+ * Configuration system — ~/.hasna/researcher/ management.
  * Supports TOML config files with env var fallbacks for API keys.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync, cpSync } from "node:fs"
 import { join } from "node:path"
 import type { ResearcherConfig } from "../types.ts"
 
 const HOME = process.env.HOME ?? process.env.USERPROFILE ?? "."
-const CONFIG_DIR = join(HOME, ".researcher")
+const CONFIG_DIR = join(HOME, ".hasna", "researcher")
+const OLD_CONFIG_DIR = join(HOME, ".researcher")
 const CONFIG_FILE = join(CONFIG_DIR, "config.toml")
 const DB_FILE = join(CONFIG_DIR, "researcher.db")
+
+// Auto-migrate from old location
+if (!existsSync(CONFIG_DIR) && existsSync(OLD_CONFIG_DIR)) {
+  try {
+    mkdirSync(join(HOME, ".hasna"), { recursive: true })
+    cpSync(OLD_CONFIG_DIR, CONFIG_DIR, { recursive: true })
+  } catch {
+    // Fall through
+  }
+}
 
 export const DEFAULT_CONFIG: ResearcherConfig = {
   general: {

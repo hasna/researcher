@@ -32,10 +32,10 @@ export function registerBrainsCommand(program: Command): void {
     .command("gather")
     .description("Gather training data from research projects, workspaces, and knowledge")
     .option("-l, --limit <n>", "Max number of training examples", "500")
-    .option("-o, --output <dir>", "Output directory (default: ~/.researcher/training/)")
+    .option("-o, --output <dir>", "Output directory (default: ~/.hasna/researcher/training/)")
     .action(async (opts: { limit?: string; output?: string }) => {
       const limit = parseInt(opts.limit ?? "500", 10)
-      const outputDir = opts.output ?? join(homedir(), ".researcher", "training")
+      const outputDir = opts.output ?? join(homedir(), ".hasna", "researcher", "training")
       const json = isJson(program)
 
       if (!json) {
@@ -73,7 +73,7 @@ export function registerBrainsCommand(program: Command): void {
     .description("Start a fine-tuning job using @hasna/brains")
     .option("--base-model <model>", "Base model to fine-tune", DEFAULT_MODEL)
     .option("--name <name>", "Name for the fine-tuned model", "researcher-v1")
-    .option("--dataset <path>", "Path to JSONL dataset (default: latest in ~/.researcher/training/)")
+    .option("--dataset <path>", "Path to JSONL dataset (default: latest in ~/.hasna/researcher/training/)")
     .option("--provider <provider>", "Provider: openai or thinker-labs", "openai")
     .action(async (opts: { baseModel: string; name: string; dataset?: string; provider: string }) => {
       const json = isJson(program)
@@ -101,7 +101,7 @@ export function registerBrainsCommand(program: Command): void {
       // Resolve dataset path
       let datasetPath = opts.dataset
       if (!datasetPath) {
-        const trainingDir = join(homedir(), ".researcher", "training")
+        const trainingDir = join(homedir(), ".hasna", "researcher", "training")
         try {
           const { readdirSync, statSync } = await import("node:fs")
           const files = readdirSync(trainingDir)
@@ -113,7 +113,7 @@ export function registerBrainsCommand(program: Command): void {
             .sort((a: { mtime: number }, b: { mtime: number }) => b.mtime - a.mtime)
 
           if (files.length === 0) {
-            const msg = "No JSONL datasets found in ~/.researcher/training/. Run: researcher brains gather"
+            const msg = "No JSONL datasets found in ~/.hasna/researcher/training/. Run: researcher brains gather"
             if (json) jsonOut({ error: msg })
             else console.error("✖ " + msg)
             process.exit(1)

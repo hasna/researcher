@@ -2,16 +2,27 @@
  * Storage path resolution — finds the right .researcher/ folder.
  *
  * Two locations:
- * 1. Global: ~/.researcher/ — config, profiles, registry, cross-project knowledge
+ * 1. Global: ~/.hasna/researcher/ — config, profiles, registry, cross-project knowledge
  * 2. Local: <project>/.researcher/ — project-specific experiments, results, sandboxes
  */
 
-import { existsSync, mkdirSync } from "node:fs"
+import { existsSync, mkdirSync, cpSync } from "node:fs"
 import { join, resolve, dirname } from "node:path"
 
 const HOME = process.env.HOME ?? process.env.USERPROFILE ?? "."
-const GLOBAL_DIR = join(HOME, ".researcher")
+const GLOBAL_DIR = join(HOME, ".hasna", "researcher")
+const OLD_GLOBAL_DIR = join(HOME, ".researcher")
 const LOCAL_DIR_NAME = ".researcher"
+
+// Auto-migrate from old global location on module load
+if (!existsSync(GLOBAL_DIR) && existsSync(OLD_GLOBAL_DIR)) {
+  try {
+    mkdirSync(join(HOME, ".hasna"), { recursive: true })
+    cpSync(OLD_GLOBAL_DIR, GLOBAL_DIR, { recursive: true })
+  } catch {
+    // Fall through
+  }
+}
 
 // ─── Global paths ────────────────────────────────────────────────────────────
 
@@ -115,7 +126,7 @@ export function getGitRemote(dir: string): string | null {
 // ─── Initialization ──────────────────────────────────────────────────────────
 
 /**
- * Ensure global ~/.researcher/ directory structure exists.
+ * Ensure global ~/.hasna/researcher/ directory structure exists.
  */
 export function ensureGlobalDir(): void {
   for (const dir of [GLOBAL_DIR, getProfilesDir()]) {

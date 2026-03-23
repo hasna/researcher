@@ -1,5 +1,5 @@
 // Model config for open-researcher.
-// Stores the active fine-tuned model ID in ~/.researcher/config.json.
+// Stores the active fine-tuned model ID in ~/.hasna/researcher/config.json.
 // (Separate from config.toml which holds the framework config.)
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
@@ -8,7 +8,7 @@ import { join } from "node:path"
 export const DEFAULT_MODEL = "gpt-4o-mini"
 
 const HOME = process.env.HOME ?? process.env.USERPROFILE ?? "."
-const CONFIG_DIR = join(HOME, ".researcher")
+const CONFIG_DIR = join(HOME, ".hasna", "researcher")
 const MODEL_CONFIG_FILE = join(CONFIG_DIR, "config.json")
 
 interface ResearcherModelConfig {
@@ -42,7 +42,7 @@ export function getActiveModel(): string {
 }
 
 /**
- * Set the active fine-tuned model ID in ~/.researcher/config.json.
+ * Set the active fine-tuned model ID in ~/.hasna/researcher/config.json.
  */
 export function setActiveModel(id: string): void {
   const config = readConfig()

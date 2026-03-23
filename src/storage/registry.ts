@@ -1,6 +1,6 @@
 /**
  * Global project registry — tracks all known .researcher/ projects across the filesystem.
- * Stored at ~/.researcher/registry.db
+ * Stored at ~/.hasna/researcher/registry.db
  */
 
 import { Database } from "bun:sqlite"

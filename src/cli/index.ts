@@ -52,15 +52,15 @@ program
   .action(async (options) => {
     const cwd = process.cwd()
 
-    // 1. Ensure global ~/.researcher/ exists
+    // 1. Ensure global ~/.hasna/researcher/ exists
     ensureGlobalDir()
     ensureConfigDir()
     const config = loadConfig()
     saveConfig(config)
 
     if (options.globalOnly) {
-      console.log("Initialized global ~/.researcher/")
-      console.log("  Config: ~/.researcher/config.toml")
+      console.log("Initialized global ~/.hasna/researcher/")
+      console.log("  Config: ~/.hasna/researcher/config.toml")
       return
     }
 
@@ -1083,11 +1083,11 @@ program
     const checks: { name: string; ok: boolean; detail: string }[] = []
 
     // Config
-    const configPath = join(home, ".researcher", "config.toml")
+    const configPath = join(home, ".hasna", "researcher", "config.toml")
     checks.push({ name: "Config file", ok: existsSync(configPath), detail: configPath })
 
     // Database
-    const dbPath = join(home, ".researcher", "researcher.db")
+    const dbPath = join(home, ".hasna", "researcher", "researcher.db")
     checks.push({ name: "Database", ok: existsSync(dbPath), detail: dbPath })
 
     // Providers
