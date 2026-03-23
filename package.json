@@ -1,6 +1,6 @@
 {
   "name": "@hasna/researcher",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Universal autonomous experimentation framework — PFLK/GREE cycles, knowledge graphs, entity extraction, sqlite-vec search, multi-provider LLM routing, SQLite knowledge base, sandbox isolation",
   "type": "module",
   "bin": {
@@ -24,8 +24,8 @@
     "mcp": "bun run src/mcp/index.ts"
   },
   "publishConfig": {
-    "access": "restricted",
-    "registry": "https://registry.npmjs.org/"
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
@@ -45,7 +45,7 @@
   "peerDependencies": {
     "typescript": "^5"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "Andrei Hasna <andrei@hasna.com>",
   "repository": {
     "type": "git",
