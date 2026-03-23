@@ -1,6 +1,6 @@
 {
   "name": "@hasna/researcher",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Universal autonomous experimentation framework — PFLK/GREE cycles, knowledge graphs, entity extraction, sqlite-vec search, multi-provider LLM routing, SQLite knowledge base, sandbox isolation",
   "type": "module",
   "bin": {
