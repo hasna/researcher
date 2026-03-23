@@ -331,6 +331,18 @@ CREATE TRIGGER IF NOT EXISTS graph_edges_au AFTER UPDATE ON graph_edges BEGIN
   VALUES (new.rowid, new.name, new.fact);
 END;
 
+-- ─── Feedback ───────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS feedback (
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+  message TEXT NOT NULL,
+  email TEXT,
+  category TEXT DEFAULT 'general',
+  version TEXT,
+  machine_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ─── Schema version tracking ─────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS schema_version (

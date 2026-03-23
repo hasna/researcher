@@ -480,6 +480,22 @@ server.tool(
   },
 )
 
+// ─── Feedback ────────────────────────────────────────────────────────────────
+
+server.tool(
+  "send_feedback",
+  "Send feedback about this service",
+  { message: z.string(), email: z.string().optional(), category: z.enum(["bug", "feature", "general"]).optional() },
+  async (params: { message: string; email?: string; category?: string }) => {
+    try {
+      db.run("INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)", [params.message, params.email || null, params.category || "general", "0.1.4"]);
+      return { content: [{ type: "text" as const, text: "Feedback saved. Thank you!" }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: String(e) }], isError: true };
+    }
+  },
+)
+
 // ─── Start server ────────────────────────────────────────────────────────────
 
 const transport = new StdioServerTransport()

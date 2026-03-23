@@ -3,7 +3,7 @@
  * Uses bun:sqlite native API.
  */
 
-import { Database } from "bun:sqlite"
+import { SqliteAdapter as Database } from "@hasna/cloud"
 import { existsSync, mkdirSync, cpSync } from "fs"
 import { SCHEMA_SQL, SCHEMA_VERSION } from "./schema.ts"
 
